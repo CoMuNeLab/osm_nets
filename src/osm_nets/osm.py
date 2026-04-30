@@ -30,7 +30,6 @@ from sklearn.cluster import DBSCAN
 from tqdm.contrib.concurrent import process_map
 
 from osm_nets import logconfig
-
 CACHE = Path("~/.cache").expanduser() / "osm_retrieve_networks"
 CACHE.mkdir(parents=True, exist_ok=True)
 
@@ -563,6 +562,9 @@ class Base:
         else:
             crs = other.crs
 
+        if len(other) == 0:
+            return self
+
         data = gpd.GeoDataFrame(pd.concat([self.data, other.data]), geometry="geometry", crs=crs)
 
         # deduplicate
@@ -803,7 +805,7 @@ class Edges(Base):
             self._sindex_updated_[kind] = True
         return self._sindex_[kind]
 
-    def split_edges_when_touching(self) -> Edges:
+    def split_edges_when_touching(self, tol: float = 0.0) -> Edges:
         """Joins edges at their intersection.
 
         If the extreme of an edge touches another edge, the latter is split in that point.
@@ -818,15 +820,14 @@ class Edges(Base):
         new_data = self.data
 
         new_edges = process_map(
-            partial(__split_edge__, self),
+            partial(__split_edge__, self, tol=tol),
             new_data.geometry.tolist(),
             chunksize=10,
-            desc="Split nodes",
+            desc="Split edges at nodes",
         )
 
         new_data.geometry = list(new_edges)
-        new_data = new_data.explode("geometry", ignore_index=True)
-
+        new_data = gpd.GeoDataFrame(new_data.explode("geometry", ignore_index=True), crs=self.crs)
         return Edges(new_data).cleanup()
 
     def nodes_from_boundaries(self, prefix: str) -> Nodes:
@@ -916,8 +917,22 @@ class Edges(Base):
         else:
             raise NotImplementedError()
 
+        if "source" in self.data.columns or "target" in self.data.columns:
+            self.data = self.data.loc[self.data.geometry.geom_type == "LineString"]
+        else:
+            self.data = self.data.loc[
+                self.data.geometry.geom_type.isin({"LineString", "MultiLineString"})
+            ].explode("geometry", ignore_index=True)
+
         self.drop_duplicates()
         return self
+
+    def fix_cycles(self, buffer: float = 1) -> Edges:
+        edges = self.data
+        __fix_cycles = partial(fix_cycles, buffer=buffer)
+        __fix_cycles = partial(fix_cycles2, buffer=buffer, threshold=0.0001)
+        edges["geometry"] = process_map(__fix_cycles, edges.geometry, chunksize=10)
+        return Edges(edges.explode().reset_index())
 
     def merge_edges(self, edge_ids: Iterable[Iterable[Hashable]]) -> Edges:
         """Merge listed edges."""
@@ -1315,7 +1330,7 @@ class Graph:
 
     @classmethod
     def read(
-        cls, path: Path, node_index: str | None = None, crs: str | int | pyproj.CRS = PRJ_DEG
+        cls, path: Path | str, node_index: str | None = None, crs: str | int | pyproj.CRS = PRJ_DEG
     ) -> Graph:
         edges = gpd.read_file(path, layer="edges").set_crs(crs, allow_override=True)
         nodes = gpd.read_file(path, layer="nodes").set_crs(crs, allow_override=True)
@@ -1325,7 +1340,8 @@ class Graph:
 
         return Graph(edges=Edges(edges), region=region, nodes=Nodes(nodes))
 
-    def write(self, path: Path) -> None:
+    def write(self, path: Path | str) -> None:
+        path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
         path.unlink(missing_ok=True)
@@ -1338,11 +1354,11 @@ class Graph:
             self.nodes.data.to_file(path, driver="GPKG", layer="nodes", index=True)
         self.region.to_file(path, driver="GPKG", layer="region")
 
-    def graph_ig(self):
+    def graph_ig(self, weight: str = "weight"):
         """Return a igraph Graph."""
-        if "weight" in self.edges.data.columns:
+        if weight in self.edges.data.columns:
             return ig.Graph.TupleList(
-                self.edges.data[["source", "target", "weight"]].itertuples(index=False),
+                self.edges.data[["source", "target", weight]].itertuples(index=False),
                 weights=True,
                 directed=False,
             )
@@ -1367,8 +1383,11 @@ class Graph:
         largest_component = list(max(self.connected_components, key=len))
         return self.filter_nodes(largest_component)
 
-    def shortest_paths(self, subset: pd.Index | None = None):
-        """Yields the shortest paths between any two nodes."""
+    def shortest_paths(self, subset: pd.Index | None = None, parallelize: bool = False):
+        """Yields the shortest paths between any two nodes.
+
+        Parallelization requires a lot of memory.
+        """
         graph_ig = self.graph_ig()
         nodes = np.array(graph_ig.vs["name"])
 
@@ -1377,7 +1396,7 @@ class Graph:
 
         assert len(set(subset) - set(nodes)) == 0, f"Not included {set(subset) - set(nodes)}"
 
-        if False:
+        if parallelize:
             # parallel processing requires a lot of memory
             for paths in process_map(
                 partial(__yield_shortest_paths__, graph=graph_ig, subset=subset),
@@ -1389,6 +1408,140 @@ class Graph:
             for component in tqdm.tqdm(self.connected_components, desc="Short paths"):
                 for path in __yield_shortest_paths__(component, graph_ig, subset):
                     yield nodes[path]
+
+    def check_path_acceptable(
+        self,
+        path: list,
+        metanodes: pd.Series | None = None,
+        nodes_to_avoid: pd.Index | None = None,
+        avoid_within: float = 0.0,
+        force_smooth: bool = False,
+    ) -> bool:
+        """Check if the shortest path between `pair = (p1, p2)` is acceptable."""
+        p1, p2 = path[0], path[-1]
+
+        # avoid all nodes except its own boundaries.
+        if nodes_to_avoid is not None and metanodes is not None:
+            metanode1 = metanodes[p1]
+            metanode2 = metanodes[p2]
+            _nodes_to_avoid = set(nodes_to_avoid.drop(metanode1 + metanode2, errors="ignore"))
+
+            if avoid_within > 0.0:
+                # remove this path if any of the nodes to avoid fall within distance from the path
+                min_distance = shapely.distance(
+                    self.nodes.data.loc[path[1:-1]].geometry.union_all(),
+                    self.nodes.data.loc[list(_nodes_to_avoid)].geometry.union_all(),
+                )
+                if min_distance < avoid_within:
+                    return False
+            else:
+                # remove only if the nodes to avoid are in the path
+                if len(_nodes_to_avoid & set(path)) > 0:
+                    return False
+
+        # if `force_smooth` remove non smooth paths
+        if force_smooth and len(path) > 2:
+            for p1, p2, p3 in zip(path, path[1:], path[2:], strict=False):
+                e1 = self.edges.get_link(p1, p2)
+                e2 = self.edges.get_link(p2, p3)
+                if e1 is None or e2 is None:
+                    msg = f"No such edge. (e1: {p1}-{p1}, e2: {p2}-{p3})"
+                    raise ValueError(msg)
+                if not check_smooth(e1.geometry, e2.geometry):
+                    return False
+
+        return True
+
+    def from_shortest_path(
+        self,
+        metanodes: pd.Series | pd.Index,
+        avoid_distance: float = 0.0,
+        force_smooth: bool = False,
+        parallelize: bool = False,
+    ) -> Graph:
+        """From nodes build the network following shortest paths if they do not overlap.
+
+        WARNING: the column `weight` for edges will be overwritten.
+
+        Parameters
+        ----------
+        metanodes: pd.Series|pd.Index
+            either the list of nodes to use to construct the shortest path graph (pd.Index) or the list of representative nodes with their corresponding set of nodes (pd.Series).
+        avoid_distance: float
+            path approaching other nodes to keep are discarded if they fall within this distance
+        force_smooth: bool
+            discard non-smooth paths
+        """
+        # nodes origin of links
+        if isinstance(metanodes, pd.Index):
+            points = self.nodes.data.loc[metanodes]
+            avoid = gpd.GeoDataFrame({"geometry": []}, geometry="geometry").set_crs(
+                PRJ_DEG, allow_override=True
+            )
+            metanodes = pd.Series([[x] for x in metanodes], index=metanodes)
+        elif isinstance(metanodes, pd.Series):
+            points = self.nodes.data.loc[metanodes.index]
+            avoid = self.nodes.data.loc[metanodes.explode()]
+        # do not avoid nodes outside the region of interest
+        # This is because those nodes have not been aggregated and can fall close to the station.
+        avoid = avoid[avoid.geometry.within(self.region.iloc[0].geometry)]
+
+        edges = self.edges
+        edges.data["weight"] = edges.data.length
+
+        iloc = {
+            (e[side[0]], e[side[1]]): ie
+            for ie, (_, e) in enumerate(edges.data.iterrows())
+            for side in [("source", "target"), ("target", "source")]
+        }
+
+        log.info("Find shortest paths")
+        paths = list(self.shortest_paths(subset=points.index, parallelize=parallelize))
+        log.info("Check shortest paths")
+        paths = [
+            p
+            for p in tqdm.tqdm(paths, desc="Check paths", total=len(paths))
+            if self.check_path_acceptable(
+                p,
+                metanodes,
+                nodes_to_avoid=avoid.index,
+                avoid_within=avoid_distance,
+                force_smooth=force_smooth,
+            )
+        ]
+        log.info("Build edges")
+        new_edges = pd.DataFrame(
+            [
+                {"edge": iloc[(e1, e2)], "__id__": ipath, "source": path[0], "target": path[-1]}
+                for ipath, path in enumerate(paths)
+                for e1, e2 in zip(path, path[1:], strict=False)
+            ]
+        )
+        new_edges = gpd.GeoDataFrame(
+            pd.concat(
+                [
+                    new_edges,
+                    edges.data.drop(columns=["source", "target"])
+                    .iloc[new_edges["edge"]]
+                    .reset_index(),
+                ],
+                axis=1,
+            ),
+            crs=edges.crs,
+        )
+
+        log.info("Build edges")
+        new_edges = Edges(
+            new_edges.drop(columns=["edge", "weight", "index"], errors="ignore")
+        ).drop_duplicated_edges()
+        log.info("Dissolve")
+        new_edges.data = new_edges.data.dissolve("__id__")
+        log.info("line_merge")
+        new_edges.data.geometry = new_edges.data.geometry.line_merge()
+
+        return Graph(
+            edges=new_edges.drop_duplicated_edges(), region=self.region, nodes=Nodes(points)
+        )
 
     def drop_disconnected_nodes(self) -> Graph:
         n = self.nodes.data
@@ -1460,6 +1613,7 @@ def graph_from_shortest_path(
     metanodes: pd.Series | pd.Index,
     avoid_distance: float = 0.0,
     force_smooth: bool = False,
+    parallelize: bool = False,
 ) -> Graph:
     """From nodes build the network following shortest paths if they do not overlap.
 
@@ -1499,18 +1653,44 @@ def graph_from_shortest_path(
         for side in [("source", "target"), ("target", "source")]
     }
 
-    paths = (
+    log.info("Find shortest paths")
+    paths = list(graph.shortest_paths(subset=points.index, parallelize=parallelize))
+    log.info("Check shortest paths")
+    __func__ = partial(
+        __shortest_path__,
+        graph=graph,
+        metanodes=metanodes,
+        nodes_to_avoid=avoid.index,
+        avoid_within=avoid_distance,
+        force_smooth=force_smooth,
+    )
+    # paths = process_map(__func__, paths, chunksize=100, desc="Check paths")
+    paths = [
         __shortest_path__(
-            graph,
             path,
+            graph,
             metanodes,
             nodes_to_avoid=avoid.index,
             avoid_within=avoid_distance,
             force_smooth=force_smooth,
         )
-        for path in graph.shortest_paths(subset=points.index)
-    )
-    paths = (p for p in paths if p is not None)
+        for path in tqdm.tqdm(paths, desc="Check paths", total=len(paths))
+    ]
+    log.info("Remove unaccebtable paths.")
+    paths = [p for p in paths if p is not None]
+    # paths = (
+    #     __shortest_path__(
+    #         graph,
+    #         path,
+    #         metanodes,
+    #         nodes_to_avoid=avoid.index,
+    #         avoid_within=avoid_distance,
+    #         force_smooth=force_smooth,
+    #     )
+    #     for path in graph.shortest_paths(subset=points.index, parallelize=parallelize)
+    # )
+    # paths = (p for p in paths if p is not None)
+    log.info("Get ids")
     ids = [
         {"edge": iloc[(e1, e2)], "__id__": ipath, "source": path[0], "target": path[-1]}
         for ipath, path in enumerate(paths)
@@ -1878,14 +2058,21 @@ def mode(data: list):
 
 
 def __split_edge__(
-    edges: Edges, edge: shapely.LineString
+    edges: Edges, edge: shapely.LineString, tol: float = 0.0
 ) -> shapely.LineString | shapely.MultiLineString:
     """Split edge if touched by another edge."""
-    touches_s = set(edges.strtree("s").query(edge, predicate="intersects"))
-    touches_s -= set(edges.strtree("s").query(edge.boundary, predicate="intersects"))
-    touches_t = set(edges.strtree("t").query(edge, predicate="intersects"))
-    touches_t -= set(edges.strtree("t").query(edge.boundary, predicate="intersects"))
-    touches = touches_s | touches_t
+    if tol <= 0.0:
+        touches_s = set(edges.strtree("s").query(edge, predicate="intersects"))
+        touches_s -= set(edges.strtree("s").query(edge.boundary, predicate="intersects"))
+        touches_t = set(edges.strtree("t").query(edge, predicate="intersects"))
+        touches_t -= set(edges.strtree("t").query(edge.boundary, predicate="intersects"))
+        touches = touches_s | touches_t
+    else:
+        touches_s = set(edges.strtree("s").query(edge, predicate="dwithin", distance=tol))
+        touches_s -= set(edges.strtree("s").query(edge.boundary, predicate="dwithin", distance=tol))
+        touches_t = set(edges.strtree("t").query(edge, predicate="dwithin", distance=tol))
+        touches_t -= set(edges.strtree("t").query(edge.boundary, predicate="dwithin", distance=tol))
+        touches = touches_s | touches_t
 
     if len(touches) == 0:
         return edge
@@ -1947,14 +2134,14 @@ def __add_node_to_edges__(
 
 
 def __shortest_path__(
-    graph: Graph,
     path: list,
+    graph: Graph,
     metanodes: pd.Series,
     nodes_to_avoid: pd.Index | None = None,
     avoid_within: float = 0.0,
     force_smooth: bool = False,
 ) -> list | None:
-    """Find the shortest path between `pair = (p1, p2)`."""
+    """Check if the shortest path between `pair = (p1, p2)` is acceptable."""
     p1, p2 = path[0], path[-1]
 
     # avoid all nodes except its own boundaries.
@@ -2125,15 +2312,88 @@ def mmerge_lines(
     return lines
 
 
-def fix_line(line: shapely.LineString | shapely.MultiLineString) -> shapely.LineString | None:
+def fix_cycles2(line: shapely.LineString, buffer: float = 1.0, threshold: float = 0.001):
+    p1, p2 = shapely.Point(line.coords[0]), shapely.Point(line.coords[-1])
+    if shapely.distance(p1, p2) >= threshold:
+        return line
+
+    if len(line.coords) <= 2:
+        return line
+
+    # this will find the farthest point.
+    # not necessarity the
+    farthest_idx = max(
+        range(1, len(line.coords) - 1),
+        key=lambda i: shapely.distance(p1, shapely.Point(line.coords[i])),
+    )
+
+    return shapely.MultiLineString(
+        [
+            shapely.LineString(line.coords[: farthest_idx + 1]),
+            shapely.LineString(line.coords[farthest_idx:]),
+        ]
+    )
+
+
+def fix_cycles(
+    line: shapely.LineString | shapely.MultiLineString, buffer: float = 1.0
+) -> shapely.LineString | shapely.MultiLineString:
+    buf = line.buffer(buffer, cap_style="flat")
+    if isinstance(buf, shapely.Polygon):
+        new_lines = [
+            pygeoops.centerline(
+                shapely.Polygon(buf.exterior.coords),
+                densify_distance=-0.1,
+                simplifytolerance=-0.01,
+                min_branch_length=-1,
+                extend=False,
+            )
+        ]
+    elif isinstance(buf, shapely.MultiPolygon):
+        new_lines = [
+            pygeoops.centerline(
+                shapely.Polygon(b.exterior.coords),
+                densify_distance=-0.1,
+                simplifytolerance=-0.01,
+                min_branch_length=-1,
+                extend=False,
+            )
+            for b in buf.geoms
+        ]
+    return shapely.union_all(new_lines)
+
+
+def splitline(line: shapely.LineString | shapely.MultiLineString) -> shapely.MultiLineString:
+    line = shapely.unary_union(line)
+
+    if isinstance(line, shapely.LineString):
+        n_points = len(line.coords)
+        if n_points <= 2:
+            return shapely.MultiLineString([line])
+
+        half = n_points // 2
+        return shapely.MultiLineString(
+            [shapely.LineString(line.coords[: half + 1]), shapely.LineString(line.coords[half:])]
+        )
+    elif isinstance(line, shapely.MultiLineString):
+        return shapely.MultiLineString(
+            [_line for _lines in line.geoms for _line in splitline(_lines).geoms]
+        )
+
+    raise AttributeError()
+
+
+def fix_line(
+    line: shapely.LineString | shapely.MultiLineString,
+) -> shapely.LineString | shapely.MultiLineString | None:
     if isinstance(line, shapely.LineString):
         boundary = line.boundary
         if len(boundary.geoms) == 2:
-            return line
+            return _join_multilinestring_(shapely.unary_union(line))
 
         if shapely.is_empty(boundary):
             # this is a cycle
-            buffer = line.buffer(line.length / 40.0, cap_style="flat")
+            buffer = line.buffer(line.length / 10.0, cap_style="flat")
             try:
                 fixed = pygeoops.centerline(buffer, min_branch_length=-2, extend=True)
             except ValueError:
@@ -2143,11 +2403,7 @@ def fix_line(line: shapely.LineString | shapely.MultiLineString) -> shapely.Line
                 return fixed
 
     elif isinstance(line, shapely.MultiLineString):
-        fixed = _join_multilinestring_(line)
-        if isinstance(fixed, shapely.LineString):
-            return fixed
-
-    pass
+        return _join_multilinestring_(line)
 
 
 def __yield_shortest_paths__(
@@ -2187,7 +2443,7 @@ def _complete_line_(
 
 def _join_multilinestring_(
     multiline: shapely.MultiLineString | shapely.LineString,
-) -> shapely.LineString:
+) -> shapely.LineString | shapely.MultiLineString:
     """Join MultiLineStrings adding missing segments."""
     if isinstance(multiline, shapely.LineString):
         return multiline
@@ -2217,6 +2473,11 @@ def _join_multilinestring_(
     for w, i, j in tomerge:
         line1 = lines[i]
         line2 = lines[j]
+
+        if shapely.is_empty(line1.boundary):
+            # this is a cycle
+            logging.warning("Cycle found in line, I must keep this as multiline")
+            return multiline
         closest1 = min(line1.boundary.geoms, key=lambda x: shapely.distance(line2.boundary, x))
         if closest1 in used:
             # this is to force the topology to be a line
@@ -2224,6 +2485,10 @@ def _join_multilinestring_(
             closest1 = max(line1.boundary.geoms, key=lambda x: shapely.distance(line2.boundary, x))
         used.add(closest1)
 
+        if shapely.is_empty(line2.boundary):
+            # this is a cycle
+            logging.warning("Cycle found in line, I must keep this as multiline")
+            return multiline
         closest2 = min(line2.boundary.geoms, key=lambda x: shapely.distance(line1.boundary, x))
         if closest2 in used:
             closest2 = max(line2.boundary.geoms, key=lambda x: shapely.distance(line1.boundary, x))
@@ -2281,6 +2546,16 @@ def _merge_edges_(to_merge: pd.DataFrame) -> pd.DataFrame:
     new_edge["geometry"] = new_edge_geom
 
     return new_edge.to_frame().T
+
+
+def __segments__(linestring):
+    if isinstance(linestring, shapely.LineString):
+        s = [[p1, p2] for p1, p2 in zip(linestring.coords, linestring.coords[1:])]
+
+    elif isinstance(linestring, shapely.MultiLineString):
+        s = [[p1, p2] for line in linestring.geoms for p1, p2 in zip(line.coords, line.coords[1:])]
+
+    return shapely.MultiLineString([shapely.LineString(ps) for ps in s])
 
 
 check_cache_size()
