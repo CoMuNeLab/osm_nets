@@ -16,8 +16,14 @@ import pandas as pd
 def build_query(
     pbf_file: Path,
     kind: Literal[
-        "railway", "power_distribution", "roads_motorway", "roads_primary", "roads_secondary"
-    ] = "railway",
+        "railway",
+        "power_distribution",
+        "roads_motorway",
+        "roads_primary",
+        "roads_secondary",
+        "highspeed-railway",
+    ]
+    | dict = "railway",
     geom: Literal["points", "lines"] = "lines",
 ) -> str:
     """Build the query to perform on the database."""
@@ -34,6 +40,11 @@ def build_query(
             }
         else:
             tags = {"railway": ["station", "halt", "stop"]}
+    elif kind == "highspeed-railway":
+        if geom == "lines":
+            tags = {"railway": "rail"}
+        else:
+            tags = {"railway": ["station", "halt", "stop"]}
     elif kind == "power_distribution":
         tags = {
             "transformer": ["distribution"],
@@ -46,6 +57,8 @@ def build_query(
         tags = {"highway": ["primary", "primary_link"]}
     elif kind == "roads_secondary" and geom == "lines":
         tags = {"highway": ["secondary", "secondary_link"]}
+    elif isinstance(kind, dict):
+        tags = kind
     else:
         raise NotImplementedError()
 
@@ -194,7 +207,7 @@ if False:  # power_distribution
     )
     gdf.geometry = gdf.geometry.representative_point()
 
-if True:  # roads
+if False:  # roads
     gdf = togdf(build_query(pbf_file, kind="roads_motorway", geom="lines"))
     gdf = gpd.GeoDataFrame(
         pd.concat([gdf, togdf(build_query(pbf_file, kind="roads_primary", geom="lines"))]),
@@ -205,8 +218,36 @@ if True:  # roads
         crs=gdf.crs,
     )
     gdf.to_file(Path("EU_roads.gpkg"), driver="GPKG", layer="lines", mode="w")
-exit()
-gdf = togdf(build_query(pbf_file, kind="railway", geom="points"))
-gdf.to_file(Path("EU_railways.gpkg"), driver="GPKG", layer="points", mode="w")
-gdf = togdf(build_query(pbf_file, kind="railway", geom="lines"))
-gdf.to_file(Path("EU_railways.gpkg"), driver="GPKG", layer="ways", mode="w")
+
+if True:
+    pbf_file = Path("~/curro/working_data/osm_sources/china-260324.osm.pbf").expanduser()
+    gdf = togdf(build_query(pbf_file, kind="highspeed-railway", geom="points"))
+    # gdf = gdf.dropna(subset=["name:en"])
+    gdf.to_file(Path("CN_railways.gpkg"), driver="GPKG", layer="points", mode="w")
+    gdf = togdf(build_query(pbf_file, kind="highspeed-railway", geom="lines"))
+    gdf.to_file(Path("CN_railways.gpkg"), driver="GPKG", layer="ways", mode="w")
+
+if False:
+    """Before extracting, filter the original file:
+
+    osmium tags-filter input_file.pbf wnr/boundary=administrative -o output.pbf --overwrite
+    """
+    pbf_file = Path("~/curro/working_data/osm_sources/china-260324.osm.pbf").expanduser()
+
+    import pyrosm
+
+    osm = pyrosm.OSM("./cn_admin.pbf")
+    bounds = osm.get_boundaries(
+        boundary_type="administrative", custom_filter={"admin_level": ["4", "5", "6"]}
+    )
+    print(bounds)
+    bounds[bounds["admin_level"] == "4"].to_file("cn_admin.gpkg", layer="admin_level_4", mode="w")
+    bounds[bounds["admin_level"] == "5"].to_file("cn_admin.gpkg", layer="admin_level_5", mode="w")
+    bounds[bounds["admin_level"] == "6"].to_file("cn_admin.gpkg", layer="admin_level_6", mode="w")
+
+
+if False:
+    gdf = togdf(build_query(pbf_file, kind="railway", geom="points"))
+    gdf.to_file(Path("EU_railways.gpkg"), driver="GPKG", layer="points", mode="w")
+    gdf = togdf(build_query(pbf_file, kind="railway", geom="lines"))
+    gdf.to_file(Path("EU_railways.gpkg"), driver="GPKG", layer="ways", mode="w")
