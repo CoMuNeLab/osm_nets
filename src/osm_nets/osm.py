@@ -30,6 +30,7 @@ from sklearn.cluster import DBSCAN
 from tqdm.contrib.concurrent import process_map
 
 from osm_nets import logconfig
+
 CACHE = Path("~/.cache").expanduser() / "osm_retrieve_networks"
 CACHE.mkdir(parents=True, exist_ok=True)
 
@@ -659,7 +660,7 @@ class Nodes(Base):
             distance=distance,
             aggfunc={index_name: list} | {c: mode for c in set(self.data.columns) - {"geometry"}},
         )
-        data.index = pd.Index([id[0] for id in data[index_name]])
+        data.index = pd.Index([id[0] for id in data[index_name]], name=index_name)
         return Nodes(data)
 
     def cleanup(self) -> Nodes:
@@ -805,7 +806,7 @@ class Edges(Base):
             self._sindex_updated_[kind] = True
         return self._sindex_[kind]
 
-    def split_edges_when_touching(self, tol: float = 0.0) -> Edges:
+    def split_edges_when_touching(self, tol: float = 0.0, max_workers: int | None = None) -> Edges:
         """Joins edges at their intersection.
 
         If the extreme of an edge touches another edge, the latter is split in that point.
@@ -824,6 +825,7 @@ class Edges(Base):
             new_data.geometry.tolist(),
             chunksize=10,
             desc="Split edges at nodes",
+            max_workers=max_workers,
         )
 
         new_data.geometry = list(new_edges)
@@ -999,6 +1001,9 @@ class Graph:
     region: gpd.GeoDataFrame
     nodes: Nodes = field(default_factory=lambda: Nodes())
 
+    def __post_init__(self):
+        self.__cache__ = {}
+
     @property
     def region_shape(self) -> shapely.Geometry:
         """`MultiPolygon` corresponding to the union of all shapes."""
@@ -1145,13 +1150,12 @@ class Graph:
         else:
             new_edges = self.edges
 
-        # Only nodes involved in links
-        new_nodes_idx = list(set(new_edges.data.source) | set(new_edges.data.target))
         return Graph(edges=new_edges, region=self.region, nodes=Nodes(new_nodes))
 
     def aggregate_nodes(self, distance: float) -> Graph:
         """Aggregate nodes within distance."""
-        nodes = self.nodes.aggregate(distance=distance).data["NODE_ID"]
+        index_name = self.nodes.index.name
+        nodes = self.nodes.aggregate(distance=distance).data[index_name]
         nodes = nodes.loc[[len(x) > 1 for x in nodes]]
         rename = {k: v for v, nns in nodes.items() for k in nns if k != v}
 
@@ -1325,6 +1329,20 @@ class Graph:
     def __str__(self) -> str:
         return "\n".join(map(str, [self.edges, self.nodes]))
 
+    def __repr__(self) -> str:
+        return "\n".join(
+            map(
+                str,
+                [
+                    f"Graph: {len(self.nodes)} nodes {len(self.edges)} edges",
+                    self.edges,
+                    "Region",
+                    self.region,
+                    self.nodes,
+                ],
+            )
+        )
+
     def __len__(self) -> int:
         return len(self.edges)
 
@@ -1355,18 +1373,24 @@ class Graph:
         self.region.to_file(path, driver="GPKG", layer="region")
 
     def graph_ig(self, weight: str = "weight"):
-        """Return a igraph Graph."""
-        if weight in self.edges.data.columns:
-            return ig.Graph.TupleList(
-                self.edges.data[["source", "target", weight]].itertuples(index=False),
-                weights=True,
-                directed=False,
-            )
-        return ig.Graph.TupleList(
-            self.edges.data[["source", "target"]].itertuples(index=False),
-            weights=True,
-            directed=False,
-        )
+        """Return a igraph Graph of the graph.
+
+        Use `weight` to store the distance
+        """
+        if "graph_ig" not in self.__cache__:
+            if weight in self.edges.data.columns:
+                self.__cache__["graph_ig"] = ig.Graph.TupleList(
+                    self.edges.data[["source", "target", weight]].itertuples(index=False),
+                    weights=True,
+                    directed=False,
+                )
+            else:
+                self.__cache__["graph_ig"] = ig.Graph.TupleList(
+                    self.edges.data[["source", "target"]].itertuples(index=False),
+                    weights=True,
+                    directed=False,
+                )
+        return self.__cache__["graph_ig"]
 
     @property
     def connected_components(self) -> list[set]:
@@ -1383,18 +1407,23 @@ class Graph:
         largest_component = list(max(self.connected_components, key=len))
         return self.filter_nodes(largest_component)
 
+    def shortest_path(self, source: Hashable, target: Hashable) -> list[Hashable] | None:
+        """Shortest paths between two nodes."""
+        graph_ig = self.graph_ig()
+        path = graph_ig.get_shortest_path(source, target)
+        if len(path) < 2 or path is None:
+            return None
+        return graph_ig.vs[path]["name"]
+
     def shortest_paths(self, subset: pd.Index | None = None, parallelize: bool = False):
         """Yields the shortest paths between any two nodes.
 
         Parallelization requires a lot of memory.
         """
         graph_ig = self.graph_ig()
-        nodes = np.array(graph_ig.vs["name"])
 
         if subset is None:
             subset = self.nodes.index
-
-        assert len(set(subset) - set(nodes)) == 0, f"Not included {set(subset) - set(nodes)}"
 
         if parallelize:
             # parallel processing requires a lot of memory
@@ -1403,11 +1432,11 @@ class Graph:
                 self.connected_components,
                 chunksize=10,
             ):
-                yield from [nodes[path] for path in paths]
+                yield from [graph_ig.vs[path]["name"] for path in paths]
         else:
             for component in tqdm.tqdm(self.connected_components, desc="Short paths"):
                 for path in __yield_shortest_paths__(component, graph_ig, subset):
-                    yield nodes[path]
+                    yield graph_ig.vs[path]["name"]
 
     def check_path_acceptable(
         self,
@@ -1656,14 +1685,14 @@ def graph_from_shortest_path(
     log.info("Find shortest paths")
     paths = list(graph.shortest_paths(subset=points.index, parallelize=parallelize))
     log.info("Check shortest paths")
-    __func__ = partial(
-        __shortest_path__,
-        graph=graph,
-        metanodes=metanodes,
-        nodes_to_avoid=avoid.index,
-        avoid_within=avoid_distance,
-        force_smooth=force_smooth,
-    )
+    # __func__ = partial(
+    #     __shortest_path__,
+    #     graph=graph,
+    #     metanodes=metanodes,
+    #     nodes_to_avoid=avoid.index,
+    #     avoid_within=avoid_distance,
+    #     force_smooth=force_smooth,
+    # )
     # paths = process_map(__func__, paths, chunksize=100, desc="Check paths")
     paths = [
         __shortest_path__(
@@ -1678,18 +1707,6 @@ def graph_from_shortest_path(
     ]
     log.info("Remove unaccebtable paths.")
     paths = [p for p in paths if p is not None]
-    # paths = (
-    #     __shortest_path__(
-    #         graph,
-    #         path,
-    #         metanodes,
-    #         nodes_to_avoid=avoid.index,
-    #         avoid_within=avoid_distance,
-    #         force_smooth=force_smooth,
-    #     )
-    #     for path in graph.shortest_paths(subset=points.index, parallelize=parallelize)
-    # )
-    # paths = (p for p in paths if p is not None)
     log.info("Get ids")
     ids = [
         {"edge": iloc[(e1, e2)], "__id__": ipath, "source": path[0], "target": path[-1]}
@@ -1907,7 +1924,7 @@ def split_edges_when_touching(edges: Edges) -> Edges:
     """
     log.info("Splitting edges to connect when touching.")
     # Use the spatial index for speed
-    sindex = edges.sindex
+    sindex = edges.data.sindex
 
     # Check if two edges touch each other and eventually split them at the intersection
     new_edges = {}
@@ -2409,7 +2426,7 @@ def fix_line(
 def __yield_shortest_paths__(
     component: Iterable, graph: ig.Graph, subset: pd.Index
 ) -> list[pd.Index]:
-    nodes = subset.intersection(component)
+    nodes = subset.intersection(pd.Index(component))
     paths = []
     if len(nodes) < 2:
         return paths
