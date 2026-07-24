@@ -1,4 +1,8 @@
-"""Configure the logs."""
+"""Logging configuration for OSM network retrieval.
+
+This module provides colored logging configuration for the OSM network retrieval tools,
+with custom formatters and stream handlers.
+"""
 
 import logging
 import logging.config
@@ -16,9 +20,10 @@ _RESET = "\033[0m"
 
 
 class ColoredFormatter(logging.Formatter):
-    """
-    Formatter that adds colors to the levelname and keeps a clear single-line output:
-    [YYYY-MM-DD HH:MM:SS.mmm] LEVEL module:line - message
+    """Custom formatter that adds ANSI colors to log level names.
+    
+    Formats log messages with colored level names for better visibility in terminals.
+    Output format: [YYYY-MM-DD HH:MM:SS.mmm] LEVEL module:line - message
     """
 
     def format(self, record):
@@ -32,9 +37,14 @@ class ColoredFormatter(logging.Formatter):
 
 
 def setup_logging(level="INFO"):
-    """
-    Configure root logger for console output.
-    Call setup_logging() early in your program.
+    """Configure the root logger for console output.
+    
+    Sets up colored logging to stdout with the specified log level.
+    
+    Parameters
+    ----------
+    level : str
+        Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL).
     """
     log_level = getattr(logging, str(level).upper(), logging.INFO)
 

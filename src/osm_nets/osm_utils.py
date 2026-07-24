@@ -1,3 +1,9 @@
+"""Utility functions for OSM network processing.
+
+This module provides helper functions for loading regions, creating buffers,
+and splitting cells for spatial analysis.
+"""
+
 from pathlib import Path
 
 import geopandas as gpd
@@ -10,9 +16,21 @@ import tqdm
 def load_regions(
     buffer_size: float | None = None, grow_regions: float | None = None, test: bool | None = None
 ) -> gpd.GeoDataFrame:
-    """Load the countries (and regions) with an optional buffer.
-
-    For now Europe.
+    """Load European regions with optional buffering and growth.
+    
+    Parameters
+    ----------
+    buffer_size : float, optional
+        Size of buffer to add around regions.
+    grow_regions : float, optional
+        Amount to grow regions by.
+    test : bool, optional
+        If True, use test data instead of full regions.
+    
+    Returns
+    -------
+    geopandas.GeoDataFrame
+        GeoDataFrame containing the regions with their geometries.
     """
     fn = "../data/prov_test.geojson" if test else "../data/regions_europe.geojson"
     keep = ["code", "geometry"] if test else ["code", "geometry", "NAME_0", "GID_0"]
@@ -39,7 +57,22 @@ def load_regions(
 def buffer(
     data: gpd.GeoDataFrame, buf_size: float = 2.0, cell_size: float | None = None
 ) -> gpd.GeoDataFrame:
-    """Create a buffer around a `GeoDataFrame`."""
+    """Create a buffer around a GeoDataFrame.
+    
+    Parameters
+    ----------
+    data : geopandas.GeoDataFrame
+        Input GeoDataFrame to buffer.
+    buf_size : float
+        Size of the buffer in degrees.
+    cell_size : float, optional
+        Size for splitting the buffer into cells.
+    
+    Returns
+    -------
+    geopandas.GeoDataFrame
+        GeoDataFrame containing the buffer regions.
+    """
     cache = Path(f"../data/regions_europe_buffer_{buf_size:5.4f}.geojson")
     print(cache)
 
@@ -70,7 +103,20 @@ def buffer(
 
 
 def split_cells(areas: shapely.MultiPolygon, cell_size: float = 2.0) -> gpd.GeoSeries:
-    """Split large polygons in smaller cells."""
+    """Split large polygons into smaller cells.
+    
+    Parameters
+    ----------
+    areas : shapely.MultiPolygon
+        Input multi-polygon to split.
+    cell_size : float
+        Size of each cell in degrees.
+    
+    Returns
+    -------
+    geopandas.GeoSeries
+        GeoSeries containing the split cells.
+    """
 
     bounds = areas.bounds
     nx = int((bounds[2] - bounds[0]) / cell_size) + 1

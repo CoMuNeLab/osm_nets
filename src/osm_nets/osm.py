@@ -1,7 +1,11 @@
-"""Base functions and utilities.
+"""Base functions and utilities for OSM network retrieval.
 
-Base functions for retrieving and postprocessing data from OpenStreetMap
-to build a network from the infra-structures.
+This module provides the core functionality for retrieving and postprocessing
+OpenStreetMap data to build network graphs from infrastructure features like
+power lines, railways, and roads.
+
+It includes classes for representing graphs, nodes, and edges, along with
+functions for retrieving, cleaning, and merging OSM data.
 """
 
 from __future__ import annotations
@@ -34,7 +38,7 @@ from osm_nets import logconfig
 CACHE = Path("~/.cache").expanduser() / "osm_retrieve_networks"
 CACHE.mkdir(parents=True, exist_ok=True)
 
-DATA = Path("~/curro/working_data/").expanduser() / "osm_retrieve_networks"
+DATA = Path("osm_retrieve_networks").expanduser()
 DATA.mkdir(parents=True, exist_ok=True)
 
 PRJ_DEG = pyproj.CRS.from_epsg(4326)
@@ -53,21 +57,21 @@ def osm_railways(
     osm_dump_file: str | Path | tuple[str | Path, str | Path],
     node_prefix: str = "",
 ) -> Graph:
-    """Retrieve the power-line network.
+    """Retrieve the railway network from OpenStreetMap.
 
     Parameters
     ----------
-    place: str | geometry.Polygon | geometry.MultiPolygon
-        Retrieve data from this place: e.g. `Padova`, `London`, `France`… or a `[Multi]Polygon`.
-    node_prefix :  str
+    place : geometry.Polygon or geometry.MultiPolygon
+        Retrieve data from this place: e.g. `Padova`, `London`, `France` or a `[Multi]Polygon`.
+    osm_dump_file : str, Path, or tuple
+        Path to OSM dump file(s) containing the data.
+    node_prefix : str
         A prefix for the nodes.
 
     Returns
     -------
-    graph : Graph
-        nodes and edges
-    powerplants : GeoDataFrame
-        the powerplants
+    Graph
+        Graph object containing nodes and edges representing the railway network.
     """
     # Retrieving the enclosing polygon.
     enclosing_polygon = place
@@ -177,19 +181,21 @@ def osm_roads(
     osm_dump_file: str | Path | tuple[str | Path, str | Path],
     node_prefix: str = "",
 ) -> Graph:
-    """Retrieve the power-line network.
+    """Retrieve the road network from OpenStreetMap.
 
     Parameters
     ----------
-    place: str | geometry.Polygon | geometry.MultiPolygon
-        Retrieve data from this place: e.g. `Padova`, `London`, `France`… or a `[Multi]Polygon`.
-    node_prefix :  str
+    place : geometry.Polygon or geometry.MultiPolygon
+        Retrieve data from this place: e.g. `Padova`, `London`, `France` or a `[Multi]Polygon`.
+    osm_dump_file : str, Path, or tuple
+        Path to OSM dump file(s) containing the data.
+    node_prefix : str
         A prefix for the nodes.
 
     Returns
     -------
-    graph : Graph
-        nodes and edges
+    Graph
+        Graph object containing nodes and edges representing the road network.
     """
     # Retrieving the enclosing polygon.
     enclosing_polygon = place
@@ -236,25 +242,27 @@ def osm_powerlines(
     voltage_fillvalue: float | None = None,
     voltage_threshold: float = 1000,
 ) -> tuple[Graph, Nodes]:
-    """Retrieve the power-line network.
+    """Retrieve the power line network from OpenStreetMap.
 
     Parameters
     ----------
-    place: geometry.Polygon | geometry.MultiPolygon
-        Retrieve data from this place: e.g. `Padova`, `London`, `France`… or a `[Multi]Polygon`.
-    voltage_fillvalue : float | None :
-         (Default value = None)
-    voltage_threshold : float
-        (Default value = 1000)
-    node_prefix :  str
+    place : geometry.Polygon or geometry.MultiPolygon
+        Retrieve data from this place: e.g. `Padova`, `London`, `France` or a `[Multi]Polygon`.
+    osm_dump_file : str, Path, or tuple
+        Path to OSM dump file(s) containing the data.
+    node_prefix : str
         A prefix for the nodes.
+    substation_distance : float
+        Distance in meters to search for substations near power lines.
+    voltage_fillvalue : float, optional
+        Value to use for missing voltage data.
+    voltage_threshold : float
+        Minimum voltage threshold for filtering power lines.
 
     Returns
     -------
-    graph : Graph
-        nodes and edges
-    powerplants : GeoDataFrame
-        the powerplants
+    tuple[Graph, Nodes]
+        Graph object containing nodes and edges, and Nodes object with power plants.
     """
     # Retrieving the enclosing poligon.
     enclosing_polygon = place
@@ -381,7 +389,6 @@ def osm_powerlines(
 def retrieve_nodes(
     osm_dump_file: str | Path,
     keys: dict | None = None,
-    filename: str | None = None,
     polygon: geometry.Polygon | geometry.MultiPolygon | None = None,
     columns: list[str] | None = None,
     node_prefix: str = "NODE_",
@@ -396,17 +403,23 @@ def retrieve_nodes(
 
     Parameters
     ----------
-    keys : dict
-        The OpenStreetMap keys to use for download.
-        The Union of the results are retrieved.
-    place : str
-        Retrieve data from this place: e.g. `Padova`, `London`, `France`…
+    osm_dump_file : str or Path
+        Path to the OSM dump file.
+    keys : dict, optional
+        The OpenStreetMap keys to use for download. The Union of the results are retrieved.
+    polygon : geometry.Polygon or geometry.MultiPolygon, optional
+        Geographic area to filter the data.
+    columns : list[str], optional
+        List of columns to keep in the output.
+    node_prefix : str
+        Prefix for node IDs.
+    layer : str
+        Layer name in the OSM dump file.
 
     Returns
     -------
-    nodes : GeoDataFrame
-        Points
-
+    Nodes
+        Nodes object containing the retrieved point data.
     """
     log.info("Retrieving `Point` data from OpenStreetMap.")
     nodes = retrieve_data(
@@ -441,25 +454,29 @@ def retrieve_edges(
 ) -> Graph:
     """Retrieve edge data from OpenStreetMap.
 
-    Only `LineString` will be kept.
+    Only `LineString` geometries will be kept.
 
     Parameters
     ----------
-    keys : dict
-        The OpenStreetMap keys to use for download.
-        The Union of the results are retrieved.
-    place : str
-        Retrieve data from this place: e.g. `Padova`, `London`, `France`…
-    polygon: geometry.Polygon | geometry.MultiPolygon | None
-        An enclosing polygon
-    columns : list[str]
-        The list of metadata to keep
+    osm_dump_file : str or Path
+        Path to the OSM dump file.
+    keys : dict, optional
+        The OpenStreetMap keys to use for download. The Union of the results are retrieved.
+    polygon : geometry.Polygon or geometry.MultiPolygon, optional
+        An enclosing polygon to filter the data.
+    columns : list[str], optional
+        The list of metadata columns to keep.
+    node_prefix : str
+        Prefix for node IDs.
+    split_when_touching : bool, optional
+        Whether to split edges when they touch each other.
+    layer : str
+        Layer name in the OSM dump file.
 
     Returns
     -------
-    edges : Edges
-        The edges
-
+    Graph
+        Graph object containing the retrieved edges.
     """
     log.info("Retrieving `LineString` data from OpenStreetMap.")
     data = retrieve_data(
@@ -496,10 +513,26 @@ def retrieve_data(
     osm_dump_file: str | Path,
     keys: dict | None = None,
     polygon: geometry.Polygon | geometry.MultiPolygon | None = None,
-    columns: list[str] | None = None,
     layer: str = "points",
 ) -> gpd.GeoDataFrame:
-    """Get the raw data."""
+    """Retrieve raw data from an OSM dump file.
+
+    Parameters
+    ----------
+    osm_dump_file : str or Path
+        Path to the OSM dump file.
+    keys : dict, optional
+        OSM tags to filter the data.
+    polygon : geometry.Polygon or geometry.MultiPolygon, optional
+        Geographic area to filter the data.
+    layer : str
+        Layer name in the OSM dump file.
+
+    Returns
+    -------
+    geopandas.GeoDataFrame
+        Raw GeoDataFrame with the retrieved data.
+    """
     # load data from osm dump file
     print(layer)
     data = gpd.read_file(str(Path(osm_dump_file).expanduser()), layer=layer, mask=polygon).explode()
@@ -529,6 +562,11 @@ def retrieve_data(
 
 @dataclass
 class Base:
+    """Base class for geographic data containers.
+
+    Provides common functionality for classes that wrap GeoDataFrames.
+    """
+
     data: gpd.GeoDataFrame = field(default_factory=lambda: gpd.GeoDataFrame([]))
 
     def __post_init__(self):
@@ -639,6 +677,11 @@ class Base:
 
 
 class Nodes(Base):
+    """Container for node data in a graph.
+
+    Represents points in a geographic network with spatial indexing capabilities.
+    """
+
     def __post_init__(self):
         # Utilities and cache
         self._sindex_updated_ = False
@@ -676,7 +719,9 @@ class Nodes(Base):
 
 
 class Edges(Base):
-    """Edge data.
+    """Container for edge data in a graph.
+
+    Represents line features connecting nodes in a geographic network.
 
     Warning: the columns `source`, `target` and `weight` will be overwritten.
     """
@@ -894,8 +939,6 @@ class Edges(Base):
         complete_to_boundary: bool | None = None,
         complete_multilines: bool | None = None,
     ) -> Edges:
-        new_geometries = []
-
         new_geometries = process_map(
             partial(
                 _complete_join_multilinestring_,
@@ -929,6 +972,12 @@ class Edges(Base):
 
 @dataclass
 class Graph:
+    """Graph data structure for geographic networks.
+
+    Represents a geographic network with nodes, edges, and a region.
+    Provides methods for network analysis, merging, and conversion.
+    """
+
     edges: Edges
     region: gpd.GeoDataFrame
     nodes: Nodes = field(default_factory=lambda: Nodes())
@@ -938,26 +987,29 @@ class Graph:
 
     @property
     def region_shape(self) -> shapely.Geometry:
-        """`MultiPolygon` corresponding to the union of all shapes."""
+        """Get the union of all region shapes as a MultiPolygon.
+
+        Returns
+        -------
+        shapely.Geometry
+            Union of all region geometries.
+        """
         return self.region.union_all(method="unary")
 
     def nodes_from_edges(self, node_prefix: str = "") -> Graph:
         """Extract and deduplicate the nodes at the edge extremes.
 
-        Update edges to include `source` and `target`
+        Update edges to include `source` and `target`.
 
         Parameters
         ----------
-        edges : geopd.GeoDataFrame
-            The edges
+        node_prefix : str
+            Prefix for node IDs.
 
         Returns
         -------
-        nodes : GeoDataFrame
-            All nodes
-        edges : GeoDataFrame
-            Same edges with columns `source_col` and `target_col` added
-
+        Graph
+            New graph with extracted nodes.
         """
         log.info("Extracting nodes from edges.")
         new_nodes = self.edges.nodes_from_boundaries(prefix=node_prefix)
@@ -978,10 +1030,32 @@ class Graph:
         )
 
     def index(self) -> pd.Index:
-        """Index of the edges (`self.edges.index`)"""
+        """Get the index of the edges.
+
+        Returns
+        -------
+        pd.Index
+            Index of the edges.
+        """
         return self.edges.index
 
     def has_edge(self, source: Hashable, target: Hashable, symmetric: bool | None = None) -> bool:
+        """Check if an edge exists between two nodes.
+
+        Parameters
+        ----------
+        source : Hashable
+            Source node ID.
+        target : Hashable
+            Target node ID.
+        symmetric : bool, optional
+            If True, check both directions.
+
+        Returns
+        -------
+        bool
+            True if the edge exists.
+        """
 
         if symmetric:
             if "symedges" not in self.__cache__:
@@ -1191,16 +1265,6 @@ class Graph:
 
         return list(edges.keys())
 
-    # def split_edges(self, other: Graph):
-    #     """Split edges in those intersecting the other.region and the others."""
-    #     # Edges in self, crossing to other.region
-    #     sindex = shapely.STRtree(self.edges.data.geometry)
-    #     crossing_ids = self.edges.index[sindex.query(other.region_shape, predicate="intersects")]
-    #
-    #     g_inner = self.filter_edges(self.index().difference(list(crossing_ids)))
-    #     g_outer = self.filter_edges(crossing_ids)
-    #     return g_inner, g_outer
-
     def merge(self, other: Graph, tol: float = 50) -> Graph:
         """Blend and merge two graphs into one.
 
@@ -1329,6 +1393,7 @@ class Graph:
     def read(
         cls, path: Path | str, node_index: str | None = None, crs: str | int | pyproj.CRS = PRJ_DEG
     ) -> Graph:
+        """Read a `Graph` from file."""
         edges = gpd.read_file(path, layer="edges").set_crs(crs, allow_override=True)
         nodes = gpd.read_file(path, layer="nodes").set_crs(crs, allow_override=True)
         if node_index is not None:
@@ -1338,6 +1403,13 @@ class Graph:
         return Graph(edges=Edges(edges), region=region, nodes=Nodes(nodes))
 
     def write(self, path: Path | str) -> None:
+        """Write the graph to a file.
+
+        Parameters
+        ----------
+        path : Path or str
+            Output file path.
+        """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1352,9 +1424,17 @@ class Graph:
         self.region.to_file(path, driver="GPKG", layer="region", mode="w")
 
     def graph_ig(self, weight: str = "weight"):
-        """Return a igraph Graph of the graph.
+        """Return an igraph Graph representation of the graph.
 
-        Use `weight` to store the distance
+        Parameters
+        ----------
+        weight : str
+            Column name to use for edge weights.
+
+        Returns
+        -------
+        igraph.Graph
+            igraph representation of the graph.
         """
         if "graph_ig" not in self.__cache__:
             if weight in self.edges.data.columns:
@@ -1373,6 +1453,13 @@ class Graph:
 
     @property
     def connected_components(self) -> list[set]:
+        """Get the connected components of the graph.
+
+        Returns
+        -------
+        list[set]
+            List of sets, where each set contains node IDs in a connected component.
+        """
         try:
             return self.cc
         except AttributeError:
@@ -1383,13 +1470,35 @@ class Graph:
         return self.cc
 
     def largest_component(self) -> Graph:
+        """Get the largest connected component of the graph.
+
+        Returns
+        -------
+        Graph
+            New graph containing only the largest connected component.
+        """
         largest_component = list(max(self.connected_components, key=len))
         return self.filter_nodes(largest_component)
 
     def shortest_path(
         self, source: Hashable, target: Hashable, weight: str | None = None
     ) -> list[Hashable] | None:
-        """Shortest paths between two nodes."""
+        """Find the shortest path between two nodes.
+
+        Parameters
+        ----------
+        source : Hashable
+            Source node ID.
+        target : Hashable
+            Target node ID.
+        weight : str, optional
+            Edge weight column to use for weighted shortest path.
+
+        Returns
+        -------
+        list[Hashable] or None
+            List of node IDs in the shortest path, or None if no path exists.
+        """
         graph_ig = self.graph_ig()
         path = graph_ig.get_shortest_path(source, target, weights=weight)
         if len(path) < 2 or path is None:
@@ -1397,9 +1506,19 @@ class Graph:
         return graph_ig.vs[path]["name"]
 
     def shortest_paths(self, subset: pd.Index | None = None, parallelize: bool = False):
-        """Yields the shortest paths between any two nodes.
+        """Yield the shortest paths between any two nodes.
 
-        Parallelization requires a lot of memory.
+        Parameters
+        ----------
+        subset : pd.Index, optional
+            Subset of nodes to consider.
+        parallelize : bool
+            If True, use parallel processing (requires more memory).
+
+        Yields
+        ------
+        list
+            Lists of node IDs representing shortest paths.
         """
         graph_ig = self.graph_ig()
 
@@ -1427,12 +1546,25 @@ class Graph:
         avoid_within: float = 0.0,
         force_smooth: bool = False,
     ) -> bool:
-        """Check if the shortest path between `pair = (p1, p2)` is acceptable.
+        """Check if a path is acceptable based on various criteria.
 
-        There are two mechanisms:
-        1. paths should start from `metanodes` and avoind all other nodes
-            (within `avoid_within`).
-        2. path should be smooth.
+        Parameters
+        ----------
+        path : list
+            List of node IDs representing the path.
+        metanodes : pd.Series, optional
+            Series mapping node IDs to their representative nodes.
+        nodes_to_avoid : pd.Index, optional
+            Nodes that should be avoided.
+        avoid_within : float
+            Distance within which to avoid nodes.
+        force_smooth : bool
+            If True, require the path to be smooth.
+
+        Returns
+        -------
+        bool
+            True if the path is acceptable.
         """
         p1, p2 = path[0], path[-1]
 
@@ -1475,18 +1607,25 @@ class Graph:
         force_smooth: bool = False,
         parallelize: bool = False,
     ) -> Graph:
-        """From nodes build the network following shortest paths if they do not overlap.
-
-        WARNING: the column `weight` for edges will be overwritten.
+        """Build a new graph from shortest paths between metanodes.
 
         Parameters
         ----------
-        metanodes: pd.Series|pd.Index
-            either the list of nodes to use to construct the shortest path graph (pd.Index) or the list of representative nodes with their corresponding set of nodes (pd.Series).
-        avoid_distance: float
-            path approaching other nodes to keep are discarded if they fall within this distance
-        force_smooth: bool
-            discard non-smooth paths
+        metanodes : pd.Series or pd.Index
+            Nodes to use as endpoints for the shortest paths.
+            Either the list of nodes to use to construct the shortest path graph (pd.Index)
+            or the list of representative nodes with their corresponding set of nodes (pd.Series).
+        avoid_distance : float
+            Distance within which to avoid other nodes.
+        force_smooth : bool
+            If True, require paths to be smooth.
+        parallelize : bool
+            If True, use parallel processing.
+
+        Returns
+        -------
+        Graph
+            New graph with edges representing shortest paths.
         """
         # nodes origin of links
         if isinstance(metanodes, pd.Index):
@@ -1560,14 +1699,19 @@ class Graph:
         )
 
     def from_shortest_path_all(self, pairs: pd.DataFrame) -> Graph:
-        """From nodes build the network following the weighted shortest paths.
+        """Build a new graph from shortest paths between all pairs.
 
         WARNING: the column `weight` for edges will be overwritten.
 
         Parameters
         ----------
-        pairs: pd.DataFrame
-            a two columns DataFrame with all pairs between which the link should be constructed
+        pairs : pd.DataFrame
+            A two-column DataFrame with all pairs between which links should be constructed.
+
+        Returns
+        -------
+        Graph
+            New graph with edges representing shortest paths between all pairs.
         """
         # nodes origin of links
         edges = self.edges
@@ -1621,6 +1765,13 @@ class Graph:
         )
 
     def drop_disconnected_nodes(self) -> Graph:
+        """Remove nodes that are not connected to any edge.
+
+        Returns
+        -------
+        Graph
+            New graph with only connected nodes.
+        """
         n = self.nodes.data
         n = n.loc[sorted(set(self.edges.source) | set(self.edges.target))]
         return Graph(edges=self.edges, region=self.region, nodes=Nodes(n))
@@ -1628,7 +1779,20 @@ class Graph:
     def complete_lines(
         self, complete_to_boundary: bool | None = None, complete_multilines: bool | None = None
     ) -> Graph:
-        """Complete links such that they touch the source and target nodes."""
+        """Complete edges to ensure they touch their source and target nodes.
+
+        Parameters
+        ----------
+        complete_to_boundary : bool, optional
+            Whether to complete lines to their boundaries.
+        complete_multilines : bool, optional
+            Whether to handle MultiLineStrings.
+
+        Returns
+        -------
+        Graph
+            New graph with completed edges.
+        """
         return Graph(
             self.edges.complete_lines(
                 self.nodes,
@@ -1640,7 +1804,13 @@ class Graph:
         )
 
     def merge_chained_edges(self) -> Graph:
-        """Join chained edges adsorbing nodes with degree = 2."""
+        """Merge chained edges by adsorbing nodes with degree 2.
+
+        Returns
+        -------
+        Graph
+            New graph with merged chained edges.
+        """
         deg = self.degree()
         # get only nodes with degree two.
         deg = deg[deg == 2]
@@ -1660,7 +1830,13 @@ class Graph:
         return Graph(new_edges, region=self.region, nodes=self.nodes).drop_disconnected_nodes()
 
     def degree(self) -> pd.Series:
-        """Degree of the nodes."""
+        """Calculate the degree of each node.
+
+        Returns
+        -------
+        pd.Series
+            Series with node IDs as index and their degrees as values.
+        """
         n1 = self.edges.source.value_counts()
         n2 = self.edges.target.value_counts()
 
@@ -1668,7 +1844,18 @@ class Graph:
 
 
 def _clean_voltage(voltage: pd.Series) -> pd.Series:
-    """Clean the voltage column."""
+    """Clean and convert voltage values to numeric.
+
+    Parameters
+    ----------
+    voltage : pd.Series
+        Series containing voltage values (may be strings or numbers).
+
+    Returns
+    -------
+    pd.Series
+        Cleaned voltage values as numeric.
+    """
 
     def _convert(cell: Number | str) -> Number | int | float:
         if isinstance(cell, Number):
@@ -1692,20 +1879,29 @@ def graph_from_shortest_path(
     force_smooth: bool = False,
     parallelize: bool = False,
 ) -> Graph:
-    """From nodes build the network following shortest paths if they do not overlap.
+    """Build a new graph from shortest paths between metanodes.
 
     WARNING: the column `weight` for edges will be overwritten.
 
     Parameters
     ----------
-    graph: Graph
-        the graph
-    metanodes: pd.Series|pd.Index
-        either the list of nodes to use to construct the shortest path graph (pd.Index) or the list of representative nodes with their corresponding set of nodes (pd.Series).
-    avoid_distance: float
-        path approaching other nodes to keep are discarded if they fall within this distance
-    force_smooth: bool
-        discard non-smooth paths
+    graph : Graph
+        The input graph.
+    metanodes : pd.Series or pd.Index
+        Nodes to use as endpoints for the shortest paths.
+        Either the list of nodes to use to construct the shortest path graph (pd.Index)
+        or the list of representative nodes with their corresponding set of nodes (pd.Series).
+    avoid_distance : float
+        Distance within which to avoid other nodes.
+    force_smooth : bool
+        If True, require paths to be smooth.
+    parallelize : bool
+        If True, use parallel processing.
+
+    Returns
+    -------
+    Graph
+        New graph with edges representing shortest paths.
     """
     # nodes origin of links
     if isinstance(metanodes, pd.Index):
@@ -1786,26 +1982,24 @@ def graph_from_shortest_path(
 def add_fuzzy_nodes(
     nodes: gpd.GeoDataFrame, edges: gpd.GeoDataFrame, distance: float = 0.0
 ) -> gpd.GeoDataFrame:
-    """Join lines which bournaries fall close to the given nodes.
+    """Join lines whose boundaries fall close to the given nodes.
 
-    Only the closed points to each extreme are taken in consideration.
+    Only the closest points to each extreme are taken into consideration.
     Example: Powerlines getting close to substations.
 
     Parameters
     ----------
-    nodes : geopd.GeoDataFrame
+    nodes : geopandas.GeoDataFrame
         The nodes dataframe.
-    edges : geopd.GeoDataFrame
+    edges : geopandas.GeoDataFrame
         The edges dataframe.
     distance : float
-         (Default value = 0.0)
-         The distance up to which edges should be connected to the a node
+        The distance up to which edges should be connected to a node.
 
     Returns
     -------
-    edges : GeoDataFrame
-        The edges connected to the points within `distance`
-
+    geopandas.GeoDataFrame
+        The edges connected to the points within `distance`.
     """
     if "name" not in nodes.columns:
         nodes["name"] = range(len(nodes))
@@ -1855,9 +2049,25 @@ def add_fuzzy_nodes(
 def cluster_points(
     points: gpd.GeoDataFrame, distance: float = 100, column: str = "__node_clusters__", **kwargs
 ) -> gpd.GeoDataFrame:
-    """Cluster nodes that are within `distance` (coordinate distance). Based on the `DBSCAN`.
+    """Cluster nodes that are within `distance` using DBSCAN.
 
-    This adds a column to the `GeoDataFrame` with the labels of each cluster.
+    This adds a column to the GeoDataFrame with the labels of each cluster.
+
+    Parameters
+    ----------
+    points : geopandas.GeoDataFrame
+        The points to cluster.
+    distance : float
+        Maximum distance between points to be considered in the same cluster.
+    column : str
+        Name of the column to store cluster labels.
+    **kwargs
+        Additional arguments passed to the dissolve function.
+
+    Returns
+    -------
+    geopandas.GeoDataFrame
+        GeoDataFrame with clustered points.
     """
     data_in_meters = points.geometry
     log.info(f"Clustering {len(points)} points")
@@ -1875,6 +2085,18 @@ def nodes_from_edges(edges: gpd.GeoDataFrame, prefix: str) -> tuple[gpd.GeoDataF
     """Extract nodes at the boundaries of each edge.
 
     Aggregate overlapping nodes.
+
+    Parameters
+    ----------
+    edges : geopandas.GeoDataFrame
+        The edges to extract nodes from.
+    prefix : str
+        Prefix for node IDs.
+
+    Returns
+    -------
+    tuple[geopandas.GeoDataFrame, pandas.DataFrame]
+        Tuple containing the nodes GeoDataFrame and edge boundary DataFrame.
     """
     edgeBoundary_nodes = edges.boundary
     edgeBoundary_nodes = gpd.GeoDataFrame(
@@ -1960,18 +2182,19 @@ def _join_line_point_buffered(
 
 
 def split_edges_when_touching(edges: Edges) -> Edges:
-    """Joins edges at their intersection.
+    """Split edges at their intersections.
 
-    If the extreme of an edge touches the another edge, the latter is splitted in that point
+    If the extreme of an edge touches another edge, the latter is split at that point.
 
     Parameters
     ----------
-    edges: geopd.GeoDataFrame :
-
+    edges : Edges
+        The edges to process.
 
     Returns
     -------
-
+    Edges
+        New edges with splits at intersections.
     """
     log.info("Splitting edges to connect when touching.")
     # Use the spatial index for speed
@@ -2031,7 +2254,7 @@ def split_edges_when_touching(edges: Edges) -> Edges:
 
 
 def check_cache_size():
-    """Compute the size of the caching folder."""
+    """Compute and log the size of the caching folder."""
     size = 0
     for root, dirs, files in CACHE.walk():
         for fl in files:
@@ -2040,6 +2263,22 @@ def check_cache_size():
 
 
 def sizeof_fmt(num, suffix: str = "iB", scale: float = 1024.0):
+    """Format a number of bytes into a human-readable string.
+
+    Parameters
+    ----------
+    num : int or float
+        Number of bytes.
+    suffix : str
+        Suffix for the unit (default: "iB" for IEC binary).
+    scale : float
+        Scale factor for units (default: 1024 for binary).
+
+    Returns
+    -------
+    str
+        Human-readable size string.
+    """
     for unit in ("", "k", "M", "G", "T", "P", "E", "Z"):
         if abs(num) < scale:
             return f"{num:3.1f}{unit}{suffix}"
@@ -2048,6 +2287,18 @@ def sizeof_fmt(num, suffix: str = "iB", scale: float = 1024.0):
 
 
 def get_geolocation(place: str) -> shapely.Polygon | shapely.MultiPolygon:
+    """Get the geographic boundary for a place name.
+
+    Parameters
+    ----------
+    place : str
+        Place name to geocode (e.g., "Padova", "London", "France").
+
+    Returns
+    -------
+    shapely.Polygon or shapely.MultiPolygon
+        Geographic boundary of the place.
+    """
     enclosing_polygon: gpd.GeoDataFrame = ox.geocoder.geocode_to_gdf(place)
     poly = enclosing_polygon.union_all()
     if poly.area > 10:
@@ -2058,6 +2309,20 @@ def get_geolocation(place: str) -> shapely.Polygon | shapely.MultiPolygon:
 
 
 def align_line_points(line: geometry.LineString, points: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Align points along a line and create line segments between them.
+
+    Parameters
+    ----------
+    line : shapely.geometry.LineString
+        The line to align points along.
+    points : geopandas.GeoDataFrame
+        Points to align along the line.
+
+    Returns
+    -------
+    geopandas.GeoDataFrame
+        GeoDataFrame with line segments between aligned points.
+    """
     points["__dist__"] = [line.line_locate_point(p) for p in points.geometry]
     points = points.sort_values(by="__dist__")
     lines = gpd.GeoDataFrame(
@@ -2076,7 +2341,20 @@ def align_line_points(line: geometry.LineString, points: gpd.GeoDataFrame) -> gp
 
 
 def check_smooth(l1: shapely.LineString, l2: shapely.LineString) -> bool:
-    """Check if the angle between the two lines is less that 90."""
+    """Check if the angle between two lines is less than 90 degrees.
+
+    Parameters
+    ----------
+    l1 : shapely.LineString
+        First line.
+    l2 : shapely.LineString
+        Second line.
+
+    Returns
+    -------
+    bool
+        True if the angle between lines is less than 90 degrees.
+    """
     p11, p12 = l1.boundary.geoms
     p21, p22 = l2.boundary.geoms
 
@@ -2111,13 +2389,36 @@ def check_smooth(l1: shapely.LineString, l2: shapely.LineString) -> bool:
 def segment(line: shapely.LineString, nsegment: int = 0) -> shapely.LineString:
     """Return a segment of the given line.
 
-    Warning: $nsegment \\in [0, N-2]$
+    Warning: nsegment should be in [0, N-2]
+
+    Parameters
+    ----------
+    line : shapely.LineString
+        The line to extract a segment from.
+    nsegment : int
+        Index of the segment to return.
+
+    Returns
+    -------
+    shapely.LineString
+        The requested segment.
     """
     return shapely.LineString([line.coords[nsegment], line.coords[nsegment + 1]])
 
 
 def mode(data: list):
-    """Return the mode or a random entry."""
+    """Return the mode or a random entry from a list.
+
+    Parameters
+    ----------
+    data : list
+        Input list of values.
+
+    Returns
+    -------
+    Any
+        The mode (most frequent value) or a random entry if no mode exists.
+    """
     data_s = pd.Series(data).dropna()
     if len(data_s) == 0:
         return None
@@ -2156,35 +2457,11 @@ def __split_edge__(
 
 
 def __add_node_to_edge_tree__(
-    node_tuple: tuple[Hashable, pd.Series],
-    trees: dict[str, shapely.STRtree],
-    distance: float,
-    border_distance: float = 0.0,
+    node_tuple: tuple[Hashable, pd.Series], trees: dict[str, shapely.STRtree], distance: float
 ) -> dict:
     """Find the closest edge and return a dict."""
     nodeid, node = node_tuple
     result = {"nodeid": nodeid}
-
-    # # Check if node is close to the source of ONE edge
-    # edges_ids = trees["s"].query_nearest(
-    #     node.geometry, max_distance=border_distance, all_matches=False
-    # )
-    #
-    # if len(edges_ids) > 0:
-    #     result["edgeid"] = edges_ids
-    #     result["type"] = "source"
-    #
-    #     return result
-    #
-    # # Check if node is close to the end of ONE line
-    # edges_ids = trees["t"].query_nearest(
-    #     node.geometry, max_distance=border_distance, all_matches=False
-    # )
-    # if len(edges_ids) > 0:
-    #     result["edgeid"] = edges_ids
-    #     result["type"] = "target"
-    #
-    #     return result
 
     # Check if node is close to some lines
     edges_ids = trees["e"].query(node.geometry, predicate="dwithin", distance=distance)
@@ -2312,6 +2589,24 @@ def new_cliques(nodes: Nodes, clusters: pd.Series) -> Edges:
 def concat(
     gdfs: Iterable[gpd.GeoDataFrame], geometry="geometry", crs=PRJ_DEG, ignore_index: bool = True
 ) -> gpd.GeoDataFrame:
+    """Concatenate multiple GeoDataFrames.
+
+    Parameters
+    ----------
+    gdfs : Iterable[geopandas.GeoDataFrame]
+        GeoDataFrames to concatenate.
+    geometry : str
+        Name of the geometry column.
+    crs : pyproj.CRS
+        Coordinate reference system.
+    ignore_index : bool
+        If True, ignore the original indices.
+
+    Returns
+    -------
+    geopandas.GeoDataFrame
+        Concatenated GeoDataFrame.
+    """
     return gpd.GeoDataFrame(
         pd.concat(gdfs, ignore_index=ignore_index, axis="index"), geometry=geometry, crs=crs
     )
@@ -2320,9 +2615,21 @@ def concat(
 def merge_lines(
     l1: shapely.LineString, l2: shapely.LineString, force_joint: bool = False
 ) -> shapely.LineString | shapely.MultiLineString:
-    """Merge lines two lines discarding the overlapping part.
+    """Merge two lines, discarding the overlapping part.
 
-    force_join imply, add the segment that join separated lines.
+    Parameters
+    ----------
+    l1 : shapely.LineString
+        First line.
+    l2 : shapely.LineString
+        Second line.
+    force_joint : bool
+        If True, add a segment to join separated lines.
+
+    Returns
+    -------
+    shapely.LineString or shapely.MultiLineString
+        Merged line(s).
     """
     # Find the nearest points between l1 and l2
     point_on_l1, point_on_l2 = ops.nearest_points(l1, l2)
@@ -2362,6 +2669,20 @@ def mmerge_lines(
     l1: shapely.LineString | shapely.MultiLineString,
     l2: shapely.LineString | shapely.MultiLineString,
 ) -> shapely.LineString:
+    """Merge MultiLineStrings into a single line.
+
+    Parameters
+    ----------
+    l1 : shapely.LineString or shapely.MultiLineString
+        First line(s).
+    l2 : shapely.LineString or shapely.MultiLineString
+        Second line(s).
+
+    Returns
+    -------
+    shapely.LineString
+        Merged line.
+    """
     """Merge [Multi]lines."""
     lines = list(l1.geoms) if isinstance(l1, shapely.MultiLineString) else [l1]
     lines += list(l2.geoms) if isinstance(l2, shapely.MultiLineString) else [l2]

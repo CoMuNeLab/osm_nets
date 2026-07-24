@@ -1,4 +1,8 @@
-"""Load the regions of interest, find countries too large, and split them in smaller pieces."""
+"""Prepare and split regions for OSM network processing.
+
+This script loads regions of interest, identifies countries that are too large,
+and splits them into smaller pieces for more manageable processing.
+"""
 
 from pathlib import Path
 
@@ -9,7 +13,11 @@ datapath = Path("~/curro/working_data/geodata/").expanduser()
 
 
 def main() -> None:
-    """Do the main."""
+    """Main function to prepare and split regions.
+    
+    Loads administrative boundaries, filters for Europe, fixes missing data,
+    and splits large regions into smaller pieces.
+    """
 
     adms = gpd.read_file(datapath / "gadm_410.gpkg").set_index("UID", drop=True).to_crs(3857)
     print(adms)

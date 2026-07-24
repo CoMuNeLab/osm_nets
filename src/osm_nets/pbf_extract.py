@@ -1,6 +1,9 @@
-"""Extract data from `.osm.pbf` files.
+"""Extract and process data from OpenStreetMap `.osm.pbf` files.
 
-some code from
+This module provides utilities to build and execute queries on OSM PBF files
+to extract specific features like railways, power lines, and roads.
+
+Some code adapted from:
 https://github.com/do-me/fast-osm-extraction
 """
 
@@ -26,7 +29,22 @@ def build_query(
     | dict = "railway",
     geom: Literal["points", "lines"] = "lines",
 ) -> str:
-    """Build the query to perform on the database."""
+    """Build a DuckDB SQL query to extract OSM features from a PBF file.
+    
+    Parameters
+    ----------
+    pbf_file : Path
+        Path to the `.osm.pbf` file to query.
+    kind : Literal or dict
+        Type of features to extract. Can be a predefined type or a custom tag dictionary.
+    geom : Literal["points", "lines"]
+        Geometry type to extract (points or lines).
+    
+    Returns
+    -------
+    str
+        SQL query string for DuckDB.
+    """
     print(pbf_file)
     if kind == "railway":
         if geom == "lines":
@@ -143,7 +161,20 @@ def build_query(
 
 
 def dict_eval(data: str | dict, cols: set[str]):
-    """Convert to dictionary only tags within `cols`."""
+    """Convert OSM tags to a dictionary, keeping only specified columns.
+    
+    Parameters
+    ----------
+    data : str or dict
+        Raw OSM tags as string or dictionary.
+    cols : set[str]
+        Set of column names to keep.
+    
+    Returns
+    -------
+    dict
+        Dictionary with only the specified columns.
+    """
     d = eval(data) if isinstance(data, str) else data
     ks = cols.intersection(d.keys())
     ko = set(d.keys()) - cols
@@ -154,6 +185,20 @@ def dict_eval(data: str | dict, cols: set[str]):
 
 
 def togdf(query: str, explode: int = 50):
+    """Execute a query and return results as a GeoDataFrame.
+    
+    Parameters
+    ----------
+    query : str
+        SQL query to execute.
+    explode : int
+        Number of most common tags to explode into separate columns.
+    
+    Returns
+    -------
+    geopandas.GeoDataFrame
+        GeoDataFrame with the query results.
+    """
     with duckdb.connect(database=":memory:") as con:
         # Optimize DuckDB for M3 Max performance
         con.execute("INSTALL spatial;")

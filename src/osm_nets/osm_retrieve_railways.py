@@ -1,3 +1,9 @@
+"""Retrieve and merge railway networks from OpenStreetMap data.
+
+This script processes OSM data to extract railway networks for European regions,
+merging them into a unified dataset.
+"""
+
 from pathlib import Path
 
 import osm
@@ -10,6 +16,10 @@ osm.logconfig.setup_logging("INFO")
 
 
 def retrieve() -> None:
+    """Retrieve railway networks for all European countries.
+    
+    Processes each country, extracts railway data, and saves to individual files.
+    """
     countries = osm_utils.load_regions(grow_regions=0.1, test=False).sort_values(by="code")
     print(countries)
 
@@ -38,6 +48,11 @@ def retrieve() -> None:
 
 
 def merge():
+    """Merge all individual country railway networks into a single dataset.
+    
+    Combines all saved country networks into unified files for full and 
+    giant connected component (GCC) versions.
+    """
     graph = None
     graphs = sorted(datapath.glob("graph_[A-Z]*_railways.gpkg"))
     for pl_path in graphs:
@@ -55,6 +70,10 @@ def merge():
 
 
 def merge_test():
+    """Merge a test subset of railway networks.
+    
+    Combines Italian, Swiss, French, and British railway networks for testing purposes.
+    """
     graph = None
     graphs = sorted(datapath.glob("graph_ITA.*_railways.gpkg")) + [
         datapath / "graph_CHE_railways.gpkg",

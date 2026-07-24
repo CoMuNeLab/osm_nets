@@ -1,3 +1,9 @@
+"""Retrieve and merge power line networks from OpenStreetMap data.
+
+This script processes OSM data to extract power line networks for European regions,
+merging them into a unified dataset.
+"""
+
 from pathlib import Path
 
 import geopandas as geopd
@@ -13,6 +19,10 @@ osm.logconfig.setup_logging("INFO")
 
 
 def retrieve():
+    """Retrieve power line networks for all European countries.
+    
+    Processes each country, extracts power line data, and saves to individual files.
+    """
     countries = osm_utils.load_regions(buffer_size=2.0, test=False).sort_values(by="code")
     print(countries)
 
@@ -37,7 +47,10 @@ def retrieve():
 
 
 def merge() -> None:
-    """Do the main."""
+    """Merge all individual country power line networks into a single dataset.
+    
+    Combines all saved country networks and power plant data into unified files.
+    """
     # Load the countries
 
     graph: osm.Graph | None = None
