@@ -227,24 +227,6 @@ if True:
     gdf = togdf(build_query(pbf_file, kind="highspeed-railway", geom="lines"))
     gdf.to_file(Path("CN_railways.gpkg"), driver="GPKG", layer="ways", mode="w")
 
-if False:
-    """Before extracting, filter the original file:
-
-    osmium tags-filter input_file.pbf wnr/boundary=administrative -o output.pbf --overwrite
-    """
-    pbf_file = Path("~/curro/working_data/osm_sources/china-260324.osm.pbf").expanduser()
-
-    import pyrosm
-
-    osm = pyrosm.OSM("./cn_admin.pbf")
-    bounds = osm.get_boundaries(
-        boundary_type="administrative", custom_filter={"admin_level": ["4", "5", "6"]}
-    )
-    print(bounds)
-    bounds[bounds["admin_level"] == "4"].to_file("cn_admin.gpkg", layer="admin_level_4", mode="w")
-    bounds[bounds["admin_level"] == "5"].to_file("cn_admin.gpkg", layer="admin_level_5", mode="w")
-    bounds[bounds["admin_level"] == "6"].to_file("cn_admin.gpkg", layer="admin_level_6", mode="w")
-
 
 if False:
     gdf = togdf(build_query(pbf_file, kind="railway", geom="points"))

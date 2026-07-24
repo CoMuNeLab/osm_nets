@@ -718,73 +718,6 @@ class Edges(Base):
     def target(self):
         return self.data["target"]
 
-    def add_nodes(
-        self, nodes: Nodes, max_distance: float = 0.0, max_distance_bounds: float = 0.0
-    ) -> Edges:
-        """Add nodes as source and targets and eventually split edges accordingly."""
-        log.info(f"Adding {len(nodes)} nodes to the edges within {max_distance} meters")
-
-        edges = process_map(
-            partial(
-                __add_node_to_edges__,
-                edges=self,
-                distance=max_distance,
-                border_distance=max_distance_bounds,
-                nodeid_col=nodes.data.index.name,
-            ),
-            list(nodes.data.iterrows()),
-            chunksize=10,
-            desc="Adding nodes",
-        )
-
-        # Collect all actions to be performed `split`, `source` and `target`.
-        actions = pd.DataFrame(edges).set_index("nodeid", drop=True).explode("edgeid")
-        new_edges = self.data
-
-        # Rename nodes (on the boundaries)
-        rename = {
-            action["rename"]: nid
-            for nid, action in actions.iterrows()
-            if action["rename"] is not None
-        }
-        new_edges["source"] = new_edges["source"].replace(rename)
-        new_edges["target"] = new_edges["target"].replace(rename)
-
-        # Split edges (not on boundaries)
-        actions = actions[actions["type"] == "split"]
-        # nodes that will split the edges.
-        splitters = nodes.data.loc[actions.index]
-        splitters["edgeid"] = actions["edgeid"]
-        # change to edges
-        splitters = (
-            splitters.reset_index().groupby("edgeid").agg({"nodeid": list, "geometry": list})
-        )
-
-        new_edges = new_edges.loc[~new_edges.index.duplicated()]
-
-        # add source and target
-        for bound in ["source", "target"]:
-            splitters[bound] = new_edges.loc[splitters.index, bound]
-            splitters[bound + "_geom"] = nodes.data.loc[
-                splitters[bound], "geometry"
-            ].values  # add column ignoring index
-
-        new_edges = Edges(
-            gpd.GeoDataFrame(
-                pd.concat(
-                    [
-                        split_edge_at_points(
-                            new_edges.loc[edgeid], splitter, self.crs, point_names="nodeid"
-                        )
-                        for edgeid, splitter in splitters.iterrows()
-                    ]
-                ),
-                crs=self.crs,
-            )
-        )
-        new_edges = new_edges.append(self.drop(index=splitters.index))
-        return new_edges
-
     def strtree(self, kind: Literal["e", "s", "t"] = "e") -> shapely.STRtree:
         """The `STRtree` of edges.
 
@@ -815,18 +748,14 @@ class Edges(Base):
         -------
 
         """
-        log.info("Splitting edges to connect when touching.")
+        log.info(f"Splitting edges to connect when touching (using {max_workers} workers).")
 
         # Check if two edges touch each other and eventually split them at the intersection
         new_data = self.data
 
-        new_edges = process_map(
-            partial(__split_edge__, self, tol=tol),
-            new_data.geometry.tolist(),
-            chunksize=10,
-            desc="Split edges at nodes",
-            max_workers=max_workers,
-        )
+        self.strtree("s")  # precompute
+        self.strtree("t")  # precompute
+        new_edges = [__split_edge__(self, e, tol=tol) for e in tqdm.tqdm(new_data.geometry)]
 
         new_data.geometry = list(new_edges)
         new_data = gpd.GeoDataFrame(new_data.explode("geometry", ignore_index=True), crs=self.crs)
@@ -865,7 +794,6 @@ class Edges(Base):
             rename.get(edge.geometry.geoms[1], edge["target"])
             for _, edge in edgeBoundary_nodes.iterrows()
         ]
-        log.info(f"Still {len(exploded)} nodes")
 
         self.data["source"] = edgeBoundary_nodes["source"]
         self.data["target"] = edgeBoundary_nodes["target"]
@@ -874,6 +802,9 @@ class Edges(Base):
 
     def drop_duplicated_edges(self) -> Edges:
         # remove multiple paths between the same nodes (usually parallel paths.)
+        if not ("source" in self.data.columns and "target" in self.data.columns):
+            log.warning("No edge duplicates without `source` and `target`")
+            return self
         dup_indx = pd.Index([frozenset([e.source, e.target]) for _, e in self.data.iterrows()])
         return Edges(self.data.loc[~dup_indx.duplicated()])
 
@@ -883,8 +814,9 @@ class Edges(Base):
         Nodes in keys will be replaced with the corresponding value.
         """
         edges = self.data
-        edges.source = edges.source.replace(rename_dict)
-        edges.target = edges.target.replace(rename_dict)
+        # map is way faster that replace apparently
+        edges.source = edges.source.map(lambda x: rename_dict.get(x, x), na_action="ignore")
+        edges.target = edges.target.map(lambda x: rename_dict.get(x, x), na_action="ignore")
         return Edges(edges)
 
     def cleanup(self, cycles: Literal["ignore", "fix", "drop"] = "drop") -> Edges:
@@ -1049,6 +981,23 @@ class Graph:
         """Index of the edges (`self.edges.index`)"""
         return self.edges.index
 
+    def has_edge(self, source: Hashable, target: Hashable, symmetric: bool | None = None) -> bool:
+
+        if symmetric:
+            if "symedges" not in self.__cache__:
+                self.__cache__["symedges"] = {
+                    frozenset([e["source"], e["target"]]): eid
+                    for eid, e in self.edges.data.iterrows()
+                }
+
+            return frozenset([source, target]) in self.__cache__["symedges"]
+        s = self.edges.data.loc[self.edges.source == source, "target"]
+        if len(s) == 0:
+            return False
+        if (s == target).sum() > 0:
+            return True
+        return False
+
     def add_nodes(
         self, nodes: Nodes, max_distance: float = 0.0, max_distance_bounds: float = 0.0
     ) -> Graph:
@@ -1072,43 +1021,67 @@ class Graph:
         """
         log.info(f"Adding {len(nodes)} nodes to the edges within {max_distance} meters")
 
+        trees = {x: self.edges.strtree(x) for x in ["s", "t", "e"]}
         edges = pd.DataFrame(
             process_map(
                 partial(
-                    __add_node_to_edges__,
-                    edges=self.edges,
+                    __add_node_to_edge_tree__,
+                    trees=trees,
                     distance=max_distance,
                     border_distance=max_distance_bounds,
-                    nodeid_col=nodes.data.index.name,
                 ),
                 list(nodes.data.iterrows()),
                 chunksize=10,
                 desc="Add nodes (find edges)",
+                max_workers=5,
             )
         )
 
         if "edgeid" not in edges.columns:
+            # no edges close to the node
             log.warning(
                 f"No nodes where close to an edge (check crs {self.nodes.crs} -- {nodes.crs})"
             )
             return self
-        # no edges close to the node
+
+        edges["edgeid"] = [self.edges.index[ids] for ids in edges["edgeid"]]
+        edges["rename"] = None
+        edges.loc[edges["type"] == "source", "rename"] = [
+            self.edges.data.loc[ids[0]].source
+            for ids in edges.loc[edges["type"] == "source", "edgeid"]
+        ]
+        edges.loc[edges["type"] == "target", "rename"] = [
+            self.edges.data.loc[ids[0]].target
+            for ids in edges.loc[edges["type"] == "target", "edgeid"]
+        ]
+
         edges = edges.dropna(subset="edgeid")
 
         # Collect all actions to be performed `split`, `source` and `target`.
-        actions = pd.DataFrame(edges).set_index("nodeid", drop=True).explode("edgeid")
+        # 'split': add that node in the middle on the edges
+        # `source`: add the node at the source of one edge
+        # `target`: add that node at the target of that edge
+        # This will contain
+        # added_Node_id | edgeid | type | old_node_id (if source or target)
+        actions = edges.set_index("nodeid", drop=True).explode("edgeid")
+
+        # Merge nodes
         new_edges = self.edges.data
         new_nodes = gpd.GeoDataFrame(
-            pd.concat([nodes.data, self.nodes.data]), geometry="geometry", crs=nodes.crs
+            # new nodes are put first to keep them on drop_duplicates
+            pd.concat([nodes.data, self.nodes.data]),
+            geometry="geometry",
+            crs=nodes.crs,
         )
 
-        # Rename nodes (on the boundaries)
+        # Rename nodes (close to the boundaries of some edge)
         rename = {
             action["rename"]: nid for nid, action in actions.iterrows() if action["type"] != "split"
         }
         new_edges["source"] = new_edges["source"].replace(rename)
         new_edges["target"] = new_edges["target"].replace(rename)
         new_nodes = new_nodes.drop(index=list(rename.keys()))
+        assert len(new_nodes.index.intersection(nodes.index)) == len(nodes)
 
         # Split edges (not on boundaries)
         actions = actions[actions["type"] == "split"]
@@ -1116,6 +1089,8 @@ class Graph:
         splitters = nodes.data.loc[actions.index]
         splitters["edgeid"] = actions["edgeid"]
         # change to edges
+        # get
+        # edgeid | nodeid | geometry
         splitters = (
             splitters.reset_index().groupby("edgeid").agg({"nodeid": list, "geometry": list})
         )
@@ -1150,17 +1125,21 @@ class Graph:
         else:
             new_edges = self.edges
 
+        assert len(new_nodes.index.intersection(nodes.index)) == len(nodes)
         return Graph(edges=new_edges, region=self.region, nodes=Nodes(new_nodes))
 
     def aggregate_nodes(self, distance: float) -> Graph:
         """Aggregate nodes within distance."""
         index_name = self.nodes.index.name
+        log.info("Aggregate nodes")
         nodes = self.nodes.aggregate(distance=distance).data[index_name]
+        log.info("Aggregated nodes")
+
         nodes = nodes.loc[[len(x) > 1 for x in nodes]]
         rename = {k: v for v, nns in nodes.items() for k in nns if k != v}
-
         new_nodes = self.nodes.drop(index=list(rename.keys()))
         new_edges = self.edges.rename_nodes(rename)
+        log.info(f"Aggregated {len(self.nodes)} nodes to {len(new_nodes)}")
         return Graph(edges=new_edges, region=self.region, nodes=new_nodes)
 
     def filter_edges(self, keep_ids: list | np.ndarray | pd.Index) -> Graph:
@@ -1364,13 +1343,13 @@ class Graph:
 
         path.unlink(missing_ok=True)
         self.edges.data.drop(columns=["index"], errors="ignore").to_file(
-            path, driver="GPKG", layer="edges"
+            path, driver="GPKG", layer="edges", mode="w"
         )
         if self.nodes.index.name in self.nodes.data.columns:
-            self.nodes.data.to_file(path, driver="GPKG", layer="nodes", index=False)
+            self.nodes.data.to_file(path, driver="GPKG", layer="nodes", index=False, mode="w")
         else:
-            self.nodes.data.to_file(path, driver="GPKG", layer="nodes", index=True)
-        self.region.to_file(path, driver="GPKG", layer="region")
+            self.nodes.data.to_file(path, driver="GPKG", layer="nodes", index=True, mode="w")
+        self.region.to_file(path, driver="GPKG", layer="region", mode="w")
 
     def graph_ig(self, weight: str = "weight"):
         """Return a igraph Graph of the graph.
@@ -1407,10 +1386,12 @@ class Graph:
         largest_component = list(max(self.connected_components, key=len))
         return self.filter_nodes(largest_component)
 
-    def shortest_path(self, source: Hashable, target: Hashable) -> list[Hashable] | None:
+    def shortest_path(
+        self, source: Hashable, target: Hashable, weight: str | None = None
+    ) -> list[Hashable] | None:
         """Shortest paths between two nodes."""
         graph_ig = self.graph_ig()
-        path = graph_ig.get_shortest_path(source, target)
+        path = graph_ig.get_shortest_path(source, target, weights=weight)
         if len(path) < 2 or path is None:
             return None
         return graph_ig.vs[path]["name"]
@@ -1446,7 +1427,13 @@ class Graph:
         avoid_within: float = 0.0,
         force_smooth: bool = False,
     ) -> bool:
-        """Check if the shortest path between `pair = (p1, p2)` is acceptable."""
+        """Check if the shortest path between `pair = (p1, p2)` is acceptable.
+
+        There are two mechanisms:
+        1. paths should start from `metanodes` and avoind all other nodes
+            (within `avoid_within`).
+        2. path should be smooth.
+        """
         p1, p2 = path[0], path[-1]
 
         # avoid all nodes except its own boundaries.
@@ -1568,6 +1555,67 @@ class Graph:
         log.info("line_merge")
         new_edges.data.geometry = new_edges.data.geometry.line_merge()
 
+        return Graph(
+            edges=new_edges.drop_duplicated_edges(), region=self.region, nodes=Nodes(points)
+        )
+
+    def from_shortest_path_all(self, pairs: pd.DataFrame) -> Graph:
+        """From nodes build the network following the weighted shortest paths.
+
+        WARNING: the column `weight` for edges will be overwritten.
+
+        Parameters
+        ----------
+        pairs: pd.DataFrame
+            a two columns DataFrame with all pairs between which the link should be constructed
+        """
+        # nodes origin of links
+        edges = self.edges
+        edges.data["weight"] = edges.data.length
+
+        iloc = {
+            (e[side[0]], e[side[1]]): ie
+            for ie, (_, e) in enumerate(edges.data.iterrows())
+            for side in [("source", "target"), ("target", "source")]
+        }
+
+        log.info("Find shortest paths")
+        self.edges.data["weight"] = self.edges.data.length
+        paths = [
+            self.shortest_path(e.iloc[0], e.iloc[1], weight="weight")
+            for _, e in tqdm.tqdm(pairs.iterrows())
+        ]
+        paths = [p for p in paths if p is not None]
+        log.info("Build edges")
+        new_edges = pd.DataFrame(
+            [
+                {"edge": iloc[(e1, e2)], "__id__": ipath, "source": path[0], "target": path[-1]}
+                for ipath, path in enumerate(paths)
+                for e1, e2 in zip(path, path[1:], strict=False)
+            ]
+        )
+        new_edges = gpd.GeoDataFrame(
+            pd.concat(
+                [
+                    new_edges,
+                    edges.data.drop(columns=["source", "target"])
+                    .iloc[new_edges["edge"]]
+                    .reset_index(),
+                ],
+                axis=1,
+            ),
+            crs=edges.crs,
+        )
+
+        log.info("Build edges")
+        new_edges = Edges(new_edges.drop(columns=["edge", "weight", "index"], errors="ignore"))
+        log.info("Dissolve")
+        new_edges.data = new_edges.data.dissolve("__id__")
+        log.info("line_merge")
+        new_edges.data.geometry = new_edges.data.geometry.line_merge()
+
+        c1, c2 = pairs.columns
+        points = self.nodes.data.loc[np.union1d(pairs[c1].to_numpy(), pairs[c2].to_numpy())]
         return Graph(
             edges=new_edges.drop_duplicated_edges(), region=self.region, nodes=Nodes(points)
         )
@@ -1812,7 +1860,10 @@ def cluster_points(
     This adds a column to the `GeoDataFrame` with the labels of each cluster.
     """
     data_in_meters = points.geometry
-    labels = DBSCAN(eps=distance, min_samples=2).fit_predict([[p.x, p.y] for p in data_in_meters])
+    log.info(f"Clustering {len(points)} points")
+    labels = DBSCAN(eps=distance, min_samples=2, algorithm="kd_tree", n_jobs=-1).fit_predict(
+        np.array([data_in_meters.x, data_in_meters.y]).T
+    )
     solitons = labels == -1
     maxlabels = labels.max()
     labels[solitons] = np.arange(sum(solitons)) + (maxlabels + 1)
@@ -2104,46 +2155,42 @@ def __split_edge__(
     return new_edges
 
 
-def __add_node_to_edges__(
+def __add_node_to_edge_tree__(
     node_tuple: tuple[Hashable, pd.Series],
-    edges: Edges,
+    trees: dict[str, shapely.STRtree],
     distance: float,
     border_distance: float = 0.0,
-    nodeid_col: str = "id",
 ) -> dict:
     """Find the closest edge and return a dict."""
     nodeid, node = node_tuple
     result = {"nodeid": nodeid}
 
-    # Check if node is close to the source of ONE edge
-    edges_ids = edges.strtree("s").query_nearest(
-        node.geometry, max_distance=border_distance, all_matches=False
-    )
-
-    if len(edges_ids) > 0:
-        result["edgeid"] = edges.data.index[edges_ids]
-        result["type"] = "source"
-        result["rename"] = edges.data.iloc[edges_ids[0]].source
-
-        return result
-
-    # Check if node is close to the end of ONE line
-    edges_ids = edges.strtree("t").query_nearest(
-        node.geometry, max_distance=border_distance, all_matches=False
-    )
-    if len(edges_ids) > 0:
-        result["edgeid"] = edges.data.index[edges_ids]
-        result["type"] = "target"
-        result["rename"] = edges.data.iloc[edges_ids[0]].target
-
-        return result
+    # # Check if node is close to the source of ONE edge
+    # edges_ids = trees["s"].query_nearest(
+    #     node.geometry, max_distance=border_distance, all_matches=False
+    # )
+    #
+    # if len(edges_ids) > 0:
+    #     result["edgeid"] = edges_ids
+    #     result["type"] = "source"
+    #
+    #     return result
+    #
+    # # Check if node is close to the end of ONE line
+    # edges_ids = trees["t"].query_nearest(
+    #     node.geometry, max_distance=border_distance, all_matches=False
+    # )
+    # if len(edges_ids) > 0:
+    #     result["edgeid"] = edges_ids
+    #     result["type"] = "target"
+    #
+    #     return result
 
     # Check if node is close to some lines
-    edges_ids = edges.strtree("e").query(node.geometry, predicate="dwithin", distance=distance)
+    edges_ids = trees["e"].query(node.geometry, predicate="dwithin", distance=distance)
     if len(edges_ids) > 0:
-        result["edgeid"] = edges.data.index[edges_ids]
+        result["edgeid"] = edges_ids
         result["type"] = "split"
-        result["rename"] = None
 
         return result
 
