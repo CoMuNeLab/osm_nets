@@ -20,7 +20,6 @@ from typing import Hashable, Iterable, Literal, Self
 
 import geopandas as gpd
 import igraph as ig
-import networkx as nx
 import numpy as np
 import osmnx as ox
 import pandas as pd
@@ -306,7 +305,7 @@ def osm_powerlines(
     graph.edges = graph.edges.rename(columns={"source": "power_source"})
 
     if len(graph.edges) == 0:
-        return graph, gpd.GeoDataFrame([], crs=PRJ_DEG)
+        return graph, Nodes(gpd.GeoDataFrame([], crs=PRJ_DEG))
 
     if "voltage" in graph.edges.columns:
         graph.edges.data["voltage"] = _clean_voltage(graph.edges.data["voltage"])
@@ -1062,9 +1061,7 @@ class Graph:
             return True
         return False
 
-    def add_nodes(
-        self, nodes: Nodes, max_distance: float = 0.0, max_distance_bounds: float = 0.0
-    ) -> Graph:
+    def add_nodes(self, nodes: Nodes, max_distance: float = 0.0) -> Graph:
         """Add nodes.
 
         Add nodes as source and targets and eventually split edges accordingly.
@@ -2156,78 +2153,6 @@ def _join_line_point_buffered(
     return _line
 
 
-def split_edges_when_touching(edges: Edges) -> Edges:
-    """Split edges at their intersections.
-
-    If the extreme of an edge touches another edge, the latter is split at that point.
-
-    Parameters
-    ----------
-    edges : Edges
-        The edges to process.
-
-    Returns
-    -------
-    Edges
-        New edges with splits at intersections.
-    """
-    log.info("Splitting edges to connect when touching.")
-    # Use the spatial index for speed
-    sindex = edges.data.sindex
-
-    # Check if two edges touch each other and eventually split them at the intersection
-    new_edges = {}
-    for edge_id1, edge1 in edges.geometry.items():
-        # If edges are already chopped
-        if edge_id1 in new_edges:
-            continue
-
-        # Find close-by edges (only with higher index to consider only one direction)
-        possible = [edges.index[int(i)] for i in sindex.intersection(edge1.bounds)]
-        # Remove self
-        possible = [id for id in possible if id != edge_id1]
-        # Remove already chopped
-        possible = [id for id in possible if id not in new_edges]
-
-        # Find edges that actually touch the original edge
-        touches = [edge_id2 for edge_id2 in possible if edge1.touches(edges.geometry.loc[edge_id2])]
-
-        if len(touches) == 0:
-            continue
-
-        # Split edge in shorter edges at intersections.
-        edges_touch = shapely.MultiLineString(lines=edges.geometry.loc[touches].tolist())
-        edge_splitted = ops.split(edge1, edges_touch)  # MultiLineString
-        if len(edge_splitted.geoms) > 1:
-            new_edges.setdefault(edge_id1, []).extend(edge_splitted.geoms)
-
-        # Split the other edges on the original edge.
-        for touched in touches:
-            edge_splitted = ops.split(edges.geometry.loc[touched], edge1)
-            if len(edge_splitted.geoms) > 1:
-                new_edges.setdefault(touched, []).extend(edge_splitted.geoms)
-
-    result = gpd.GeoDataFrame(
-        pd.concat(
-            [
-                edges.loc[~edges.index.isin(new_edges)],
-                pd.DataFrame(
-                    [
-                        edges.loc[id].to_dict() | {"geometry": line}
-                        for id, lines in new_edges.items()
-                        for line in lines
-                    ]
-                ),
-            ],
-            ignore_index=True,
-        )
-    ).set_crs(crs=edges.crs, allow_override=True)
-    if len(new_edges) == 0:
-        return result
-    log.info("Performing a new deeper recursive level")
-    return split_edges_when_touching(result)
-
-
 def check_cache_size():
     """Compute and log the size of the caching folder."""
     size = 0
@@ -2862,8 +2787,8 @@ def _join_multilinestring_(
 
 def _complete_join_multilinestring_(
     objects: tuple[shapely.LineString | shapely.MultiLineString, shapely.Point, shapely.Point],
-    complete_multilines: bool,
-    complete_to_boundary: bool,
+    complete_multilines: bool | None = None,
+    complete_to_boundary: bool | None = None,
 ) -> shapely.LineString | shapely.MultiLineString:
     new_edge, p1, p2 = objects
 
@@ -2916,6 +2841,3 @@ def __segments__(linestring):
         s = [[p1, p2] for line in linestring.geoms for p1, p2 in zip(line.coords, line.coords[1:])]
 
     return shapely.MultiLineString([shapely.LineString(ps) for ps in s])
-
-
-check_cache_size()

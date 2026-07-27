@@ -17,7 +17,7 @@ def load_regions(
     buffer_size: float | None = None, grow_regions: float | None = None, test: bool | None = None
 ) -> gpd.GeoDataFrame:
     """Load European regions with optional buffering and growth.
-    
+
     Parameters
     ----------
     buffer_size : float, optional
@@ -26,7 +26,7 @@ def load_regions(
         Amount to grow regions by.
     test : bool, optional
         If True, use test data instead of full regions.
-    
+
     Returns
     -------
     geopandas.GeoDataFrame
@@ -58,7 +58,7 @@ def buffer(
     data: gpd.GeoDataFrame, buf_size: float = 2.0, cell_size: float | None = None
 ) -> gpd.GeoDataFrame:
     """Create a buffer around a GeoDataFrame.
-    
+
     Parameters
     ----------
     data : geopandas.GeoDataFrame
@@ -67,7 +67,7 @@ def buffer(
         Size of the buffer in degrees.
     cell_size : float, optional
         Size for splitting the buffer into cells.
-    
+
     Returns
     -------
     geopandas.GeoDataFrame
@@ -76,7 +76,7 @@ def buffer(
     cache = Path(f"../data/regions_europe_buffer_{buf_size:5.4f}.geojson")
     print(cache)
 
-    if cache.is_file() and False:
+    if cache.is_file():
         buffer = gpd.read_file(cache)
         return buffer
 
@@ -104,14 +104,14 @@ def buffer(
 
 def split_cells(areas: shapely.MultiPolygon, cell_size: float = 2.0) -> gpd.GeoSeries:
     """Split large polygons into smaller cells.
-    
+
     Parameters
     ----------
     areas : shapely.MultiPolygon
         Input multi-polygon to split.
     cell_size : float
         Size of each cell in degrees.
-    
+
     Returns
     -------
     geopandas.GeoSeries

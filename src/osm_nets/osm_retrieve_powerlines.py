@@ -81,7 +81,7 @@ def merge() -> None:
         graph.write(datapath / "graph_all_graph.gpkg")
     if powerplants is not None:
         powerplants.to_file(
-            datapath / "graph_all_graph.gpkg", driver="GPKG", layer=powerplants, index=True
+            datapath / "graph_all_graph.gpkg", driver="GPKG", layer="powerplants", index=True
         )
 
 
