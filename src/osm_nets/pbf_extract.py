@@ -30,7 +30,7 @@ def build_query(
     geom: Literal["points", "lines"] = "lines",
 ) -> str:
     """Build a DuckDB SQL query to extract OSM features from a PBF file.
-    
+
     Parameters
     ----------
     pbf_file : Path
@@ -39,13 +39,12 @@ def build_query(
         Type of features to extract. Can be a predefined type or a custom tag dictionary.
     geom : Literal["points", "lines"]
         Geometry type to extract (points or lines).
-    
+
     Returns
     -------
     str
         SQL query string for DuckDB.
     """
-    print(pbf_file)
     if kind == "railway":
         if geom == "lines":
             tags = {
@@ -162,14 +161,14 @@ def build_query(
 
 def dict_eval(data: str | dict, cols: set[str]):
     """Convert OSM tags to a dictionary, keeping only specified columns.
-    
+
     Parameters
     ----------
     data : str or dict
         Raw OSM tags as string or dictionary.
     cols : set[str]
         Set of column names to keep.
-    
+
     Returns
     -------
     dict
@@ -184,21 +183,39 @@ def dict_eval(data: str | dict, cols: set[str]):
     return new_tags
 
 
-def togdf(query: str, explode: int = 50):
+def extract_from_pbf(
+    pbf_file: Path,
+    kind: Literal[
+        "railway",
+        "power_distribution",
+        "roads_motorway",
+        "roads_primary",
+        "roads_secondary",
+        "highspeed-railway",
+    ]
+    | dict = "railway",
+    geom: Literal["points", "lines"] = "lines",
+    explode: int = 50,
+):
     """Execute a query and return results as a GeoDataFrame.
-    
+
     Parameters
     ----------
-    query : str
-        SQL query to execute.
+    pbf_file : Path
+        Path to the `.osm.pbf` file to query.
+    kind : Literal or dict
+        Type of features to extract. Can be a predefined type or a custom tag dictionary.
+    geom : Literal["points", "lines"]
+        Geometry type to extract (points or lines).
     explode : int
         Number of most common tags to explode into separate columns.
-    
+
     Returns
     -------
     geopandas.GeoDataFrame
         GeoDataFrame with the query results.
     """
+    query = build_query(pbf_file=pbf_file, kind=kind, geom=geom)
     with duckdb.connect(database=":memory:") as con:
         # Optimize DuckDB for M3 Max performance
         con.execute("INSTALL spatial;")
@@ -236,45 +253,4 @@ def togdf(query: str, explode: int = 50):
     gdf = gpd.GeoDataFrame(
         pd.concat([gdf.drop(columns="tags"), data_tags], axis=1), geometry="geometry", crs=gdf.crs
     ).dropna(axis="columns", how="all")
-    return gdf
-
-
-pbf_file = Path("~/curro/working_data/osm_sources/europe-latest.osm.pbf").expanduser()
-# pbf_file = Path("~/Downloads/albania-260210.osm.pbf").expanduser()
-
-if False:  # power_distribution
-    gdf = pd.concat(
-        [
-            togdf(build_query(pbf_file, kind="power_distribution", geom="points")),
-            togdf(build_query(pbf_file, kind="power_distribution", geom="lines")),
-        ],
-        axis=0,
-    )
-    gdf.geometry = gdf.geometry.representative_point()
-
-if False:  # roads
-    gdf = togdf(build_query(pbf_file, kind="roads_motorway", geom="lines"))
-    gdf = gpd.GeoDataFrame(
-        pd.concat([gdf, togdf(build_query(pbf_file, kind="roads_primary", geom="lines"))]),
-        crs=gdf.crs,
-    )
-    gdf = gpd.GeoDataFrame(
-        pd.concat([gdf, togdf(build_query(pbf_file, kind="roads_secondary", geom="lines"))]),
-        crs=gdf.crs,
-    )
-    gdf.to_file(Path("EU_roads.gpkg"), driver="GPKG", layer="lines", mode="w")
-
-if True:
-    pbf_file = Path("~/curro/working_data/osm_sources/china-260324.osm.pbf").expanduser()
-    gdf = togdf(build_query(pbf_file, kind="highspeed-railway", geom="points"))
-    # gdf = gdf.dropna(subset=["name:en"])
-    gdf.to_file(Path("CN_railways.gpkg"), driver="GPKG", layer="points", mode="w")
-    gdf = togdf(build_query(pbf_file, kind="highspeed-railway", geom="lines"))
-    gdf.to_file(Path("CN_railways.gpkg"), driver="GPKG", layer="ways", mode="w")
-
-
-if False:
-    gdf = togdf(build_query(pbf_file, kind="railway", geom="points"))
-    gdf.to_file(Path("EU_railways.gpkg"), driver="GPKG", layer="points", mode="w")
-    gdf = togdf(build_query(pbf_file, kind="railway", geom="lines"))
-    gdf.to_file(Path("EU_railways.gpkg"), driver="GPKG", layer="ways", mode="w")
+    return gdf.loc[:, ~gdf.columns.duplicated()]
