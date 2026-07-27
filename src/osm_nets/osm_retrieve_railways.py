@@ -6,8 +6,7 @@ merging them into a unified dataset.
 
 from pathlib import Path
 
-import osm
-import osm_utils
+from osm_nets import osm, osm_utils
 
 datapath = osm.DATA / Path("graphs_railways_EU")
 datapath.mkdir(parents=True, exist_ok=True)
@@ -17,7 +16,7 @@ osm.logconfig.setup_logging("INFO")
 
 def retrieve() -> None:
     """Retrieve railway networks for all European countries.
-    
+
     Processes each country, extracts railway data, and saves to individual files.
     """
     countries = osm_utils.load_regions(grow_regions=0.1, test=False).sort_values(by="code")
@@ -35,12 +34,7 @@ def retrieve() -> None:
         else:
             pl = osm.osm_railways(
                 region["geometry"],
-                osm_dump_file=(
-                    "./EU_railways.gpkg",
-                    "./EU_railways.gpkg",
-                    # "~/curro/working_data/geodata/osm_dump/EU_railways_nodes.gpkg",
-                    # "~/curro/working_data/geodata/osm_dump/EU_railways_edges.gpkg",
-                ),
+                osm_dump_file=("./EU_railways.gpkg", "./EU_railways.gpkg"),
                 node_prefix=str(region["code"]) + "_",
             )
             if len(pl) > 0:
@@ -49,8 +43,8 @@ def retrieve() -> None:
 
 def merge():
     """Merge all individual country railway networks into a single dataset.
-    
-    Combines all saved country networks into unified files for full and 
+
+    Combines all saved country networks into unified files for full and
     giant connected component (GCC) versions.
     """
     graph = None
@@ -69,32 +63,6 @@ def merge():
     graph.write(datapath / "merged_GCC.gpkg")
 
 
-def merge_test():
-    """Merge a test subset of railway networks.
-    
-    Combines Italian, Swiss, French, and British railway networks for testing purposes.
-    """
-    graph = None
-    graphs = sorted(datapath.glob("graph_ITA.*_railways.gpkg")) + [
-        datapath / "graph_CHE_railways.gpkg",
-        datapath / "graph_FRA.7_1_railways.gpkg",
-        datapath / "graph_GBR.1.44_1_railways.gpkg",
-    ]
-    for pl_path in graphs:
-        print(pl_path)
-        if graph is None:
-            graph = osm.Graph.read(pl_path, node_index="NODE_ID").to_meters()
-        else:
-            graph = graph.merge(osm.Graph.read(pl_path, node_index="NODE_ID").to_meters(), tol=50)
-    if graph is None:
-        return
-    graph = graph.to_degree()
-    graph.write(Path("merged_full.gpkg"))
-    graph = graph.largest_component()
-    graph.write(Path("merged_GCC.gpkg"))
-
-
 if __name__ == "__main__":
     retrieve()
-    # merge_test()
     merge()

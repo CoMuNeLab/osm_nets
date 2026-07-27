@@ -20,6 +20,7 @@ from typing import Hashable, Iterable, Literal, Self
 
 import geopandas as gpd
 import igraph as ig
+import networkx as nx
 import numpy as np
 import osmnx as ox
 import pandas as pd
@@ -90,12 +91,6 @@ def osm_railways(
     # Retrieve lines from `OpenStreetMap`.
     graph = retrieve_edges(
         osm_dump_file=osm_dump_file_edges,
-        # keys={
-        #     "railway": ["rail", "construction", "preserved", "narrow_gauge"],
-        #     "route": ["train"],
-        #     "construction": ["rail", "railway"],
-        #     "construction:railway": ["rail", "railway"],
-        # },
         polygon=enclosing_polygon,
         columns=[
             "id",
@@ -422,9 +417,7 @@ def retrieve_nodes(
         Nodes object containing the retrieved point data.
     """
     log.info("Retrieving `Point` data from OpenStreetMap.")
-    nodes = retrieve_data(
-        osm_dump_file=osm_dump_file, keys=keys, polygon=polygon, columns=columns, layer=layer
-    )
+    nodes = retrieve_data(osm_dump_file=osm_dump_file, keys=keys, polygon=polygon, layer=layer)
     if len(nodes) == 0:
         return Nodes()
     nodes.columns = [c.replace(":", "_") for c in nodes.columns]
@@ -479,9 +472,7 @@ def retrieve_edges(
         Graph object containing the retrieved edges.
     """
     log.info("Retrieving `LineString` data from OpenStreetMap.")
-    data = retrieve_data(
-        osm_dump_file=osm_dump_file, keys=keys, polygon=polygon, columns=columns, layer=layer
-    )
+    data = retrieve_data(osm_dump_file=osm_dump_file, keys=keys, polygon=polygon, layer=layer)
 
     # Build a dataframe
     if len(data) == 0:
@@ -534,7 +525,6 @@ def retrieve_data(
         Raw GeoDataFrame with the retrieved data.
     """
     # load data from osm dump file
-    print(layer)
     data = gpd.read_file(str(Path(osm_dump_file).expanduser()), layer=layer, mask=polygon).explode()
 
     # expand tags
@@ -1098,12 +1088,7 @@ class Graph:
         trees = {x: self.edges.strtree(x) for x in ["s", "t", "e"]}
         edges = pd.DataFrame(
             process_map(
-                partial(
-                    __add_node_to_edge_tree__,
-                    trees=trees,
-                    distance=max_distance,
-                    border_distance=max_distance_bounds,
-                ),
+                partial(__add_node_to_edge_tree__, trees=trees, distance=max_distance),
                 list(nodes.data.iterrows()),
                 chunksize=10,
                 desc="Add nodes (find edges)",
@@ -1199,8 +1184,12 @@ class Graph:
         else:
             new_edges = self.edges
 
-        assert len(new_nodes.index.intersection(nodes.index)) == len(nodes)
-        return Graph(edges=new_edges, region=self.region, nodes=Nodes(new_nodes))
+        # return the new graph
+        # node aggregation on a short distance is done to avoid overlaps
+        # it prefers nodes from `nodes` since they are listed first in `new_nodes`.
+        return Graph(edges=new_edges, region=self.region, nodes=Nodes(new_nodes)).aggregate_nodes(
+            1e-5
+        )
 
     def aggregate_nodes(self, distance: float) -> Graph:
         """Aggregate nodes within distance."""
@@ -1337,12 +1326,6 @@ class Graph:
         oe = other.edges.nodes(nodes_suspicious_2.index)
         old2_edges = old2_edges.union(oe.index.tolist())
 
-        if len(g) > 0:
-            print("writing")
-            gpd.GeoSeries([x[0] for x in g], crs=PRJ_MET).to_crs(PRJ_DEG).to_file("xxx_e1.gpkg")
-            gpd.GeoSeries([x[1] for x in g], crs=PRJ_MET).to_crs(PRJ_DEG).to_file("xxx_e2.gpkg")
-            gpd.GeoSeries([x[2] for x in g], crs=PRJ_MET).to_crs(PRJ_DEG).to_file("xxx_merged.gpkg")
-
         new_edges = Edges.concat(
             [
                 self.edges.drop(index=old1_edges, errors="ignore"),
@@ -1449,6 +1432,7 @@ class Graph:
                     weights=True,
                     directed=False,
                 )
+        self.__cache__["graph_ig"].vs["label"] = self.__cache__["graph_ig"].vs["name"]
         return self.__cache__["graph_ig"]
 
     @property
@@ -1929,15 +1913,6 @@ def graph_from_shortest_path(
     log.info("Find shortest paths")
     paths = list(graph.shortest_paths(subset=points.index, parallelize=parallelize))
     log.info("Check shortest paths")
-    # __func__ = partial(
-    #     __shortest_path__,
-    #     graph=graph,
-    #     metanodes=metanodes,
-    #     nodes_to_avoid=avoid.index,
-    #     avoid_within=avoid_distance,
-    #     force_smooth=force_smooth,
-    # )
-    # paths = process_map(__func__, paths, chunksize=100, desc="Check paths")
     paths = [
         __shortest_path__(
             path,

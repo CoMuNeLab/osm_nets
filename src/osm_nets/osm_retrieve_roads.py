@@ -6,8 +6,7 @@ merging them into a unified dataset.
 
 from pathlib import Path
 
-import osm
-import osm_utils
+from osm_nets import osm, osm_utils
 
 datapath = osm.DATA / Path("graphs_roads_EU")
 datapath.mkdir(parents=True, exist_ok=True)
@@ -17,7 +16,7 @@ osm.logconfig.setup_logging("INFO")
 
 def retrieve() -> None:
     """Retrieve road networks for all European countries.
-    
+
     Processes each country, extracts road data, and saves to individual files.
     """
     countries = osm_utils.load_regions(grow_regions=0.1, test=False).sort_values(by="code")
@@ -44,8 +43,8 @@ def retrieve() -> None:
 
 def merge():
     """Merge all individual country road networks into a single dataset.
-    
-    Combines all saved country networks into unified files for full and 
+
+    Combines all saved country networks into unified files for full and
     giant connected component (GCC) versions.
     """
     graph = None
